@@ -1,0 +1,315 @@
+/* Mobile-first: расписание Академии Наяновой */
+
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+
+:root{
+  --bg:#0c1222;
+  --surface:#161f33;
+  --surface2:#1c2640;
+  --border:#253354;
+  --text:#e2e8f0;
+  --text2:#94a3b8;
+  --text3:#64748b;
+  --accent:#3b82f6;
+  --accent2:#2563eb;
+  --ok:#22c55e;
+  --err:#ef4444;
+  --radius:.75rem;
+}
+
+[data-theme="light"]{
+  --bg:#f1f5f9;
+  --surface:#ffffff;
+  --surface2:#f8fafc;
+  --border:#e2e8f0;
+  --text:#1e293b;
+  --text2:#475569;
+  --text3:#94a3b8;
+  --accent:#2563eb;
+  --accent2:#1d4ed8;
+}
+
+body{
+  min-height:100dvh;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ── Header ── */
+.header{
+  position:sticky;top:0;z-index:10;
+  background:var(--surface);
+  border-bottom:1px solid var(--border);
+  padding:.75rem 1rem;
+  display:flex;align-items:center;justify-content:space-between;
+  gap:.5rem;
+}
+.header h1{font-size:1rem;font-weight:700;white-space:nowrap}
+
+.header-right{display:flex;align-items:center;gap:.5rem}
+
+.theme-btn{
+  display:flex;align-items:center;justify-content:center;
+  width:2rem;height:2rem;
+  border:1px solid var(--border);border-radius:.5rem;
+  background:var(--surface2);color:var(--text2);
+  font-size:1rem;cursor:pointer;
+  transition:all .15s;flex-shrink:0;
+}
+.theme-btn:hover{color:var(--text);border-color:var(--text3)}
+.theme-btn .icon-sun,.theme-btn .icon-moon{display:none}
+[data-theme="dark"] .theme-btn .icon-sun{display:inline}
+[data-theme="light"] .theme-btn .icon-moon{display:inline}
+html:not([data-theme]) .theme-btn .icon-sun{display:inline}
+
+.nav{display:flex;gap:.35rem}
+.nav a{
+  padding:.35rem .75rem;border-radius:2rem;
+  text-decoration:none;font-size:.78rem;font-weight:500;
+  color:var(--text2);background:transparent;
+  transition:all .15s;white-space:nowrap;
+}
+.nav a:hover{color:var(--text);background:var(--surface2)}
+.nav a.active{color:#fff;background:var(--accent)}
+
+/* ── Controls ── */
+.controls{
+  padding:.75rem 1rem;
+  display:flex;flex-direction:column;gap:.65rem;
+  background:var(--surface);
+  border-bottom:1px solid var(--border);
+}
+
+.select-wrap{position:relative}
+.select-wrap::after{
+  content:'';position:absolute;right:.85rem;top:50%;
+  transform:translateY(-50%);
+  width:0;height:0;
+  border-left:5px solid transparent;border-right:5px solid transparent;
+  border-top:5px solid var(--text3);
+  pointer-events:none;
+}
+.select-wrap select{
+  width:100%;appearance:none;
+  padding:.65rem 2.25rem .65rem .85rem;
+  border:1px solid var(--border);border-radius:var(--radius);
+  background:var(--bg);color:var(--text);
+  font-size:.9rem;
+}
+.select-wrap select:focus{outline:none;border-color:var(--accent)}
+
+/* Week tabs — horizontal scroll */
+.week-tabs{
+  display:flex;gap:.35rem;
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
+  padding-bottom:.15rem;
+}
+.week-tabs::-webkit-scrollbar{display:none}
+
+.week-tab{
+  flex:0 0 auto;
+  padding:.4rem .75rem;
+  border:1px solid var(--border);border-radius:2rem;
+  background:transparent;color:var(--text2);
+  font-size:.78rem;font-weight:500;
+  cursor:pointer;transition:all .15s;
+  white-space:nowrap;
+  min-height:34px;
+}
+.week-tab:hover{color:var(--text);border-color:var(--text3)}
+.week-tab.active{color:#fff;background:var(--accent);border-color:var(--accent)}
+
+/* Day tabs — horizontal scroll */
+.day-tabs{
+  display:flex;gap:.35rem;
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
+  padding-bottom:.15rem;
+}
+.day-tabs::-webkit-scrollbar{display:none}
+
+.day-tab{
+  flex:0 0 auto;
+  padding:.4rem .75rem;
+  border:1px solid var(--border);border-radius:2rem;
+  background:transparent;color:var(--text2);
+  font-size:.78rem;font-weight:500;
+  cursor:pointer;transition:all .15s;
+  white-space:nowrap;
+  min-height:34px;
+}
+.day-tab:hover{color:var(--text);border-color:var(--text3)}
+.day-tab.active{color:#fff;background:var(--accent);border-color:var(--accent)}
+
+/* ── Content ── */
+.content{padding:1rem}
+
+.empty-state{
+  text-align:center;padding:2.5rem 1.5rem;
+  color:var(--text3);font-size:.9rem;
+}
+
+/* ── Date header ── */
+.date-header{
+  font-size:.85rem;font-weight:600;
+  color:var(--text2);margin-bottom:.65rem;
+}
+
+/* ── Table: hidden by default ── */
+.schedule-table{display:none}
+
+/* ── Lesson cards (mobile) ── */
+.lessons{display:flex;flex-direction:column;gap:.5rem}
+
+.lesson{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:.7rem .85rem;
+  display:grid;
+  grid-template-columns:auto 1fr auto auto;
+  grid-template-rows:auto auto;
+  gap:0 .65rem;
+  align-items:start;
+  transition:border-color .2s,box-shadow .2s;
+}
+
+.lesson-now{
+  border-color:var(--ok);
+  box-shadow:0 0 0 1px var(--ok),0 2px 12px rgba(34,197,94,.15);
+}
+.lesson-now .lesson-num{
+  background:var(--ok);border-color:var(--ok);color:#fff;
+}
+
+.break-now{
+  text-align:center;
+  font-size:.75rem;font-weight:600;
+  color:var(--ok);
+  padding:.2rem 0;
+  opacity:.8;
+}
+
+.day-done{
+  text-align:center;
+  font-size:.78rem;font-weight:600;
+  color:var(--text3);
+  padding:.5rem 0;
+  opacity:.7;
+}
+
+.lesson-num{
+  grid-row:1/3;
+  display:flex;align-items:center;justify-content:center;
+  width:2rem;height:2rem;
+  border-radius:.5rem;
+  background:var(--bg);border:1px solid var(--border);
+  font-size:.75rem;font-weight:700;color:var(--text3);
+  align-self:center;
+}
+
+.lesson-subject{
+  font-size:.9rem;font-weight:600;
+  line-height:1.3;
+  grid-column:2;
+}
+.lesson-subject .group{
+  font-weight:400;font-size:.78rem;
+  color:var(--accent);
+}
+
+.lesson-meta{
+  grid-column:2;
+  display:flex;flex-wrap:wrap;gap:.35rem .75rem;
+  font-size:.78rem;color:var(--text2);
+  margin-top:.15rem;
+}
+
+.lesson-room{
+  grid-column:3;grid-row:1/3;
+  align-self:center;
+  display:flex;align-items:center;justify-content:center;
+  min-width:2.6rem;height:2.6rem;
+  border-radius:.5rem;
+  background:rgba(59,130,246,.1);
+  border:1px solid rgba(59,130,246,.25);
+  font-size:.9rem;font-weight:700;
+  color:var(--accent);
+  white-space:nowrap;
+}
+
+.lesson-time{
+  grid-column:4;grid-row:1/3;
+  align-self:center;
+  font-size:.75rem;font-weight:500;
+  color:var(--text3);
+  white-space:nowrap;
+  text-align:right;
+}
+
+/* ── Desktop: wider cards ── */
+@media(min-width:640px){
+  .header{padding:.85rem 1.5rem}
+  .header h1{font-size:1.15rem}
+  .controls{padding:.85rem 1.5rem;flex-direction:row;align-items:center;gap:1rem}
+  .select-wrap{min-width:200px;flex:0 0 auto}
+  .content{padding:1rem 1.5rem}
+
+  .lesson{
+    grid-template-columns:2.5rem 1fr auto auto;
+    padding:.75rem 1rem;
+  }
+  .lesson-num{width:2.25rem;height:2.25rem;font-size:.8rem}
+  .lesson-subject{font-size:.95rem}
+  .lesson-room{min-width:3rem;height:3rem;font-size:1rem}
+}
+
+/* ── Desktop: table layout ── */
+@media(min-width:900px){
+  .lessons{display:none}
+
+  .schedule-table{
+    display:table;
+    width:100%;border-collapse:collapse;
+    background:var(--surface);
+    border-radius:var(--radius);
+    overflow:hidden;
+    box-shadow:0 2px 12px rgba(0,0,0,.15);
+  }
+  .schedule-table th{
+    padding:.65rem 1rem;text-align:left;
+    font-size:.7rem;font-weight:600;
+    color:var(--text3);text-transform:uppercase;letter-spacing:.04em;
+    background:var(--surface);border-bottom:1px solid var(--border);
+  }
+  .schedule-table td{
+    padding:.6rem 1rem;font-size:.85rem;
+    border-bottom:1px solid var(--border);
+    background:var(--surface);
+  }
+  .schedule-table tr:last-child td{border-bottom:none}
+  .schedule-table tr:hover td{background:var(--surface2)}
+
+  .schedule-table .row-now td{
+    background:rgba(34,197,94,.08);
+    border-left:3px solid var(--ok);
+  }
+  .schedule-table .row-break td{
+    background:transparent;border:none;padding:0;
+  }
+  .schedule-table .row-done td{
+    background:transparent;border:none;padding:0;
+  }
+
+  .schedule-table .col-num{color:var(--text3);width:40px;text-align:center}
+  .schedule-table .col-time{color:var(--text2);white-space:nowrap;width:110px}
+  .schedule-table .col-subject{font-weight:500}
+  .schedule-table .col-extra{color:var(--text2)}
+  .schedule-table .col-room{color:var(--text3);width:80px}
+  .schedule-table .group{color:var(--accent);font-size:.78rem}
+}
