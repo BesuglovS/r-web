@@ -21,6 +21,13 @@ function parse_xlsx(string $filepath): array
 
     foreach ($sheet_map as $info) {
         $name = $info['name'];
+
+        // Импортируем только листы с датой в названии («ПН 02.09», «пн 7.09»).
+        // Листы без даты («вт», «ср», …) не привязать к календарю — пропускаем.
+        if (parse_sheet_date($name)['date'] === '') {
+            continue;
+        }
+
         $file = $info['file'];
         $data = $zip->getFromName("xl/$file");
         if ($data === false) continue;
@@ -41,8 +48,13 @@ function xpath_first(DOMXPath $xpath, string $query, ?DOMNode $context = null): 
 
 function get_text(DOMXPath $xpath, DOMNode $node): string
 {
-    $t = xpath_first($xpath, './/s:t', $node);
-    return $t ? $t->textContent : '';
+    // Ячейка может состоять из нескольких <t> (rich text) — конкатенируем все
+    $parts = [];
+    $t_list = $xpath->query('.//s:t', $node);
+    for ($i = 0; $i < $t_list->length; $i++) {
+        $parts[] = $t_list->item($i)->textContent;
+    }
+    return implode('', $parts);
 }
 
 function read_shared_strings(ZipArchive $zip): array
@@ -203,7 +215,10 @@ function parse_sheet(string $xml_data, array $strings, string $sheet_name): arra
 
 /**
  * Извлекает блоки уроков из строк таблицы.
- * Каждый "пояс" колонок (0-3, 4-7, 8-11, ...) — отдельный класс.
+ * «Пояс» — группа колонок одного класса (день/время, №, предмет, резерв).
+ * Начала поясов определяются динамически: по колонкам с названиями дней
+ * недели в заголовках, где встречаются строки со временем. Это работает
+ * и со сдвинутой разметкой (например, «пн 7.09» — вся сетка с колонки B).
  * Строка-заголовок содержит имена классов в каждом поясе.
  * Строка-урок содержит время, номер и предмет в каждом поясе.
  * Пустая строка — разделитель блоков (все пояса).
@@ -214,16 +229,32 @@ function extract_blocks(array $rows): array
     $day_pattern = '/^(ПОНЕДЕЛЬНИК|ВТОРНИК|СРЕДА|ЧЕТВЕРГ|ПЯТНИЦА|СУББОТА|ВОСКРЕСЕНЬЕ)$/u';
     $class_pattern = '/^\d{1,2}[А-Я]$/u';
 
-    // Each "band" of 4 columns represents one class
-    // Band 0: cols 0-3 (A-D), Band 1: cols 4-7 (E-H), etc.
-    $bands = [
-        ['offset' => 0,  'class' => null, 'lessons' => []],
-        ['offset' => 4,  'class' => null, 'lessons' => []],
-        ['offset' => 8,  'class' => null, 'lessons' => []],
-        ['offset' => 12, 'class' => null, 'lessons' => []],
-        ['offset' => 16, 'class' => null, 'lessons' => []],
-        ['offset' => 20, 'class' => null, 'lessons' => []],
-    ];
+    // Колонки, где встречаются названия дней недели
+    $day_cols = [];
+    foreach ($rows as $cells) {
+        foreach ($cells as $col => $val) {
+            if ($val !== '' && preg_match($day_pattern, $val)) {
+                $day_cols[(int)$col] = true;
+            }
+        }
+    }
+
+    // Пояс = колонка с днём недели, в которой есть строки со временем
+    // (отсекаем случайные «дни» не в разметке расписания)
+    $bands = [];
+    foreach (array_keys($day_cols) as $off) {
+        foreach ($rows as $cells) {
+            $v = $cells[$off] ?? '';
+            if ($v !== '' && preg_match($time_pattern, $v)) {
+                $bands[] = ['offset' => (int)$off, 'class' => null, 'lessons' => []];
+                break;
+            }
+        }
+    }
+    if (empty($bands)) {
+        return [];
+    }
+    usort($bands, fn($a, $b) => $a['offset'] <=> $b['offset']);
 
     $completed_blocks = [];
 
@@ -298,7 +329,12 @@ function extract_blocks(array $rows): array
 
             if (!$lesson_cell && !$alt_cell) continue;
 
-            [$time_start, $time_end] = explode('-', $time_cell);
+            // Время строго в формате «ЧЧ:ММ-ЧЧ:ММ» (допускаем пробелы вокруг дефиса)
+            if (!preg_match('/^\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*$/', $time_cell, $tm)) {
+                continue; // некорректная ячейка времени — пропускаем, не роняя импорт
+            }
+            $time_start = $tm[1];
+            $time_end = $tm[2];
             $num = is_numeric($num_cell) ? (int)$num_cell : 0;
 
             if ($lesson_cell) {
@@ -385,10 +421,29 @@ function parse_sheet_date(string $sheet_name): array
     $day_of_week = $day_map[$short] ?? '';
 
     if (preg_match('/(\d{1,2})\.(\d{1,2})/', $sheet_name, $dm)) {
-        $day = str_pad($dm[1], 2, '0', STR_PAD_LEFT);
-        $month = str_pad($dm[2], 2, '0', STR_PAD_LEFT);
-        $year = date('Y');
-        $date = "$year-$month-$day";
+        $day = (int)$dm[1];
+        $month = (int)$dm[2];
+
+        // Валидация: месяц 1-12, день допустим для месяца — иначе мусорная
+        // дата вроде «2026-45-67» попала бы в БД и сломала выборку
+        if ($month < 1 || $month > 12 || !checkdate($month, $day, (int)date('Y'))) {
+            return ['date' => '', 'day_of_week' => $day_of_week];
+        }
+
+        $year = (int)date('Y');
+        // Учебный год: если дата листа уже в далёком прошлом (более 6 месяцев назад),
+        // она относится к следующему учебному году (например, «ПН 15.01»,
+        // импортированный в декабре, — это январь будущего года; «ПН 01.09»
+        // в мае — сентябрь будущего года).
+        $candidate = sprintf('%04d-%02d-%02d', $year, $month, $day);
+        if ($candidate < date('Y-m-d', strtotime('-6 months'))) {
+            $year++;
+        }
+        // Защита от опечаток: дата дальше чем на год вперёд — явно ошибочная
+        if ($candidate > date('Y-m-d', strtotime('+1 year'))) {
+            return ['date' => '', 'day_of_week' => $day_of_week];
+        }
+        $date = sprintf('%04d-%02d-%02d', $year, $month, $day);
     } else {
         $date = '';
     }

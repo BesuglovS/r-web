@@ -1,1 +1,4 @@
 .git/
+/db/
+/php-server.log 
+/php-server.log 

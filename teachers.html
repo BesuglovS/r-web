@@ -4,8 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Расписание — Учителя</title>
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=8">
+    <link rel="icon" href="favicon.ico?v=2" type="image/x-icon">
+    <link rel="icon" href="favicon.svg?v=2" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png?v=2">
+    <link rel="stylesheet" href="style.css?v=16">
 </head>
 <body>
     <div class="header">
@@ -28,7 +30,9 @@
                 <option value="">Выберите учителя</option>
             </select>
         </div>
-        <div class="week-tabs" id="weekTabs"></div>
+        <div class="select-wrap week-select-wrap">
+            <select id="weekSelect"></select>
+        </div>
         <div class="day-tabs" id="dayTabs"></div>
     </div>
 
@@ -36,101 +40,20 @@
         <div class="empty-state">Выберите учителя для просмотра расписания</div>
     </div>
 
-    <script src="app.js?v=8"></script>
+    <div class="last-import" id="lastImport"></div>
+
+    <button id="historyToggle" class="day-tab history-btn">Что изменилось?</button>
+    <div class="content" id="historyBox"></div>
+
+    <script src="app.js?v=21"></script>
     <script>
-    (async () => {
-        const sel = document.getElementById('teacherSelect');
-        const weekTabs = document.getElementById('weekTabs');
-        const dayTabs = document.getElementById('dayTabs');
-        const box = document.getElementById('scheduleContent');
-        let dates = [], weeks = [], teacher = '', week = '', date = '';
-
-        try {
-            const d = await apiFetch('teachers');
-            for (const t of d.teachers) {
-                const o = document.createElement('option');
-                o.value = t; o.textContent = t;
-                sel.appendChild(o);
-            }
-        } catch (e) { box.innerHTML = '<div class="empty-state">Ошибка загрузки</div>'; return; }
-
-        try { const d = await apiFetch('weeks'); weeks = d.weeks; } catch (e) { weeks = []; }
-
-        function drawWeekTabs() {
-            weekTabs.innerHTML = '';
-            if (weeks.length <= 1) { weekTabs.style.display = 'none'; return; }
-            weekTabs.style.display = '';
-            for (const w of weeks) {
-                const b = document.createElement('button');
-                b.className = 'day-tab' + (w.week_start === week ? ' active' : '');
-                b.textContent = w.label;
-                b.onclick = () => { week = w.week_start; localStorage.setItem('selectedWeekTeacher', week); loadDates(); };
-                weekTabs.appendChild(b);
-            }
-        }
-
-        async function loadDates() {
-            if (!week) { dates = []; drawDayTabs(); return; }
-            try {
-                const d = await apiFetch('dates', { week });
-                dates = d.dates;
-            } catch (e) { dates = []; }
-            if (!date || !dates.some(x => x.date === date)) {
-                const today = new Date().toISOString().slice(0, 10);
-                date = dates.find(d => d.date === today)?.date || (dates.length ? dates[0].date : '');
-            }
-            drawDayTabs();
-            if (teacher && date) load();
-        }
-
-        function drawDayTabs() {
-            dayTabs.innerHTML = '';
-            for (const d of dates) {
-                const b = document.createElement('button');
-                b.className = 'day-tab' + (d.date === date ? ' active' : '');
-                b.textContent = dateLabel(d.date);
-                b.onclick = () => { date = d.date; drawDayTabs(); load(); };
-                dayTabs.appendChild(b);
-            }
-        }
-
-        async function load() {
-            if (!teacher || !date) { box.innerHTML = '<div class="empty-state">Выберите учителя и день</div>'; return; }
-            box.innerHTML = '<div class="empty-state">Загрузка...</div>';
-            try {
-                const d = await apiFetch('schedule', { teacher, date });
-                const di = dates.find(x => x.date === date);
-                const today = new Date().toISOString().slice(0, 10);
-                const nowStatus = date === today ? getCurrentStatus(d.schedule) : null;
-                let h = di ? `<div class="date-header">${esc(dateLabel(di.date))}</div>` : '';
-                h += renderSchedule(d.schedule, 'class', nowStatus);
-                box.innerHTML = h;
-            } catch (e) { box.innerHTML = '<div class="empty-state">Ошибка загрузки</div>'; }
-        }
-
-        sel.onchange = () => { teacher = sel.value; localStorage.setItem('selectedTeacher', teacher); load(); };
-
-        if (sel.options.length > 1) {
-            const saved = localStorage.getItem('selectedTeacher');
-            if (saved && [...sel.options].some(o => o.value === saved)) {
-                sel.value = saved; teacher = saved;
-            } else {
-                sel.selectedIndex = 1; teacher = sel.value;
-            }
-        }
-
-        const today = new Date().toISOString().slice(0, 10);
-        const savedWeek = localStorage.getItem('selectedWeekTeacher');
-        if (savedWeek && weeks.some(w => w.week_start === savedWeek)) {
-            week = savedWeek;
-        } else {
-            week = weeks.find(w => today >= w.week_start && today <= w.week_end)?.week_start
-                || (weeks.length ? weeks[weeks.length - 1].week_start : '');
-            if (week) localStorage.setItem('selectedWeekTeacher', week);
-        }
-        drawWeekTabs();
-        loadDates();
-    })();
+    initSchedulePage({
+        mode: 'teacher',
+        action: 'teachers',
+        selectId: 'teacherSelect',
+        itemStorageKey: 'selectedTeacher',
+    });
+    initHistoryToggle('historyToggle', 'historyBox', { mode: 'teacher', param: 'teacher', storageKey: 'selectedTeacher' });
     </script>
 </body>
 </html>

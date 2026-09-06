@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Deploy static site to remote server via SSH.
 .DESCRIPTION
@@ -79,6 +79,18 @@ if (-not $DryRun) {
   & ssh @mkdirArgs
 }
 
+# --- 2.5. Upload .env OUTSIDE docroot (secrets must not live in public/) ---
+$envLocal = Join-Path $PSScriptRoot '.env'
+if (-not $DryRun -and (Test-Path $envLocal)) {
+  $envRemoteDir = $remotePath -replace '/[^/]+$', ''
+  Write-Host "`n==> Uploading .env to ${remote}:${envRemoteDir}/.env (outside docroot) ..." -ForegroundColor Cyan
+  $scpEnvCmd = "scp $scpArgStr `"$envLocal`" ${remote}:${envRemoteDir}/.env"
+  cmd /c $scpEnvCmd
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "  WARNING: .env upload failed - admin login via file won't work on server" -ForegroundColor Yellow
+  }
+}
+
 # --- 3. Deploy via tar + ssh ---
 Write-Host "`n==> Deploying to ${remote}:${remotePath} ..." -ForegroundColor Cyan
 
@@ -89,7 +101,7 @@ if ($DryRun) {
 
   $targz = Join-Path $env:TEMP "deploy-$(Get-Random).tar.gz"
   try {
-    & tar -czf $targz -C $PSScriptRoot --exclude '.git' --exclude 'node_modules' --exclude '*.tar.gz' .
+    & tar -czf $targz -C $PSScriptRoot --exclude '.git' --exclude 'node_modules' --exclude '*.tar.gz' --exclude '.env' --exclude 'deploy.ps1' --exclude 'AGENTS.MD' --exclude 'link.txt' --exclude 'r.nayanovaacademy.ru' --exclude 'fi.jpeg' .
     if ($LASTEXITCODE -ne 0) {
       Write-Host "  Archive creation failed" -ForegroundColor Red
       exit 1
@@ -189,7 +201,34 @@ if ($DryRun) {
   Write-Host "  Done." -ForegroundColor Green
 }
 
-# --- 5. Smoke check ---
+# --- 5. Setup cron job ---
+$cronUser = [Environment]::GetEnvironmentVariable('DEPLOY_CRON_USER')
+if (-not $cronUser) { $cronUser = 'www-data' }
+$cronLog = [Environment]::GetEnvironmentVariable('DEPLOY_CRON_LOG')
+if (-not $cronLog) { $cronLog = '/var/log/r-web-import.log' }
+$cronContent = "*/5 * * * * $cronUser php ${remotePath}/cron_import.php >> $cronLog 2>&1"
+
+if ($DryRun) {
+  Write-Host "`n  [DryRun] Setup cron job for automatic import" -ForegroundColor Yellow
+} else {
+  Write-Host "`n==> Setting up cron job ..." -ForegroundColor Cyan
+
+  $cronCmd = "echo '$cronContent' > /etc/cron.d/r-web && chmod 644 /etc/cron.d/r-web && touch $cronLog && chown ${cronUser}:${cronUser} $cronLog"
+  $sshCronArgs = @()
+  if ($sshPort -ne '22') { $sshCronArgs += "-P $sshPort" }
+  if ($identityFile) { $sshCronArgs += "-i"; $sshCronArgs += $identityFile }
+  $sshCronArgs += $remote
+  $sshCronArgs += $cronCmd
+  & ssh @sshCronArgs
+
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "  Cron setup failed (non-fatal)" -ForegroundColor Yellow
+  } else {
+    Write-Host "  Done." -ForegroundColor Green
+  }
+}
+
+# --- 6. Smoke check ---
 if (-not $DryRun -and $siteUrl) {
   Write-Host "`n==> Smoke check..." -ForegroundColor Cyan
   try {
