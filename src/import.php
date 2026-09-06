@@ -213,7 +213,11 @@ function do_import(string $public_url, ?PDO $existing_pdo = null): array
         }
 
         // BEGIN IMMEDIATE: берём блокировку записи сразу, чтобы два параллельных
-        // импорта (cron + ручной) не вычислили одинаковую версию истории
+        // импорта (cron + ручной) не вычислили одинаковую версию истории.
+        // ВАЖНО: PDO не отслеживает транзакцию, открытую через exec('BEGIN') —
+        // inTransaction() вернёт false, а $pdo->commit() бросит
+        // «There is no active transaction». Поэтому COMMIT/ROLLBACK тоже
+        // выполняем на уровне SQLite через exec().
         $pdo->exec('BEGIN IMMEDIATE');
         try {
             $changes = ['added' => 0, 'removed' => 0, 'room_changed' => 0];
@@ -401,10 +405,12 @@ function do_import(string $public_url, ?PDO $existing_pdo = null): array
                 ':status'       => $has_changes ? 'ok' : 'no_changes',
             ]);
 
-            $pdo->commit();
+            $pdo->exec('COMMIT');
         } catch (Exception $e) {
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
+            try {
+                $pdo->exec('ROLLBACK');
+            } catch (Exception $ignored) {
+                // транзакция уже закрыта самим SQLite (авто-rollback при ошибке)
             }
             throw $e;
         }
@@ -669,11 +675,13 @@ function cleanup_stale_dates(PDO $pdo, array $keep_dates): array
         $del = $pdo->prepare("DELETE FROM schedule WHERE date IN ($ph)");
         $del->execute($stale);
 
-        $pdo->commit();
+        $pdo->exec('COMMIT');
         return ['removed_dates' => $stale, 'lessons' => $lessons, 'version' => $version];
     } catch (Exception $e) {
-        if ($pdo->inTransaction()) {
-            $pdo->rollBack();
+        try {
+            $pdo->exec('ROLLBACK');
+        } catch (Exception $ignored) {
+            // транзакция уже закрыта самим SQLite (авто-rollback при ошибке)
         }
         throw $e;
     }

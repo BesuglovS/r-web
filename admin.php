@@ -106,6 +106,29 @@ if (isset($_GET['logout'])) {
     exit;
 }
 
+/**
+ * Сопоставляет запись проверки ('changed') с фактическим импортом:
+ * возвращает imported_at импорта (UTC) для этого источника, выполненного
+ * незадолго до проверки. Иначе null.
+ */
+function resolve_import_for_check(array $imports_by_url, string $url, string $checked_at): ?string
+{
+    if (!isset($imports_by_url[$url])) {
+        return null;
+    }
+    $chk = strtotime($checked_at . ' UTC');
+    if ($chk === false) {
+        return null;
+    }
+    foreach ($imports_by_url[$url] as $imported_at) {
+        $ts = strtotime($imported_at . ' UTC');
+        if ($ts !== false && $ts <= $chk && ($chk - $ts) <= 300) {
+            return $imported_at;
+        }
+    }
+    return null;
+}
+
 $sources = get_sources();
 
 $log = [];
@@ -120,6 +143,14 @@ if ($pdo !== null) {
         $check_log = $pdo->query("SELECT * FROM check_log ORDER BY id DESC LIMIT 30")->fetchAll(PDO::FETCH_ASSOC);
     } catch (Exception $e) {
         // ignore
+    }
+}
+
+// Успешные импорты по URL для сопоставления с проверками (список отсортирован по id DESC — свежие первыми)
+$imports_by_url = [];
+foreach ($log as $entry) {
+    if ($entry['status'] === 'ok' || $entry['status'] === 'no_changes') {
+        $imports_by_url[$entry['url']][] = $entry['imported_at'];
     }
 }
 ?>
@@ -264,6 +295,8 @@ if ($pdo !== null) {
         td { color: #cbd5e1; }
         .status-ok { color: #34d399; }
         .status-error { color: #f87171; }
+        tr.clickable { cursor: pointer; }
+        tr.clickable:hover td { background: #26334d; }
 
         .hint { color: #64748b; font-size: .8rem; margin-top: .5rem; }
 
@@ -461,8 +494,8 @@ if ($pdo !== null) {
                             </tr>
                         </thead>
                         <tbody>
-                            <?php foreach ($log as $entry): ?>
-                                <tr>
+                            <?php foreach ($log as $entry): $can_open = $entry['status'] === 'ok'; ?>
+                                <tr<?php if ($can_open): ?> class="clickable" title="Показать изменения этого импорта" onclick="location.href='history.php?at=<?= rawurlencode($entry['imported_at']) ?>'"<?php endif; ?>>
                                     <td><?= htmlspecialchars(utc_to_samara($entry['imported_at'])) ?></td>
                                     <td><?= (int)$entry['lessons_count'] ?></td>
                                     <td class="status-<?= htmlspecialchars($entry['status']) ?>">
@@ -496,8 +529,12 @@ if ($pdo !== null) {
                             </tr>
                         </thead>
                         <tbody>
-                            <?php foreach ($check_log as $entry): ?>
-                                <tr>
+                            <?php foreach ($check_log as $entry):
+                                $import_at = $entry['result'] === 'changed'
+                                    ? resolve_import_for_check($imports_by_url, $entry['url'], $entry['checked_at'])
+                                    : null;
+                                ?>
+                                <tr<?php if ($import_at): ?> class="clickable" title="Показать изменения этого импорта" onclick="location.href='history.php?at=<?= rawurlencode($import_at) ?>'"<?php endif; ?>>
                                     <td><?= htmlspecialchars(utc_to_samara($entry['checked_at'])) ?></td>
                                     <td class="status-<?= $entry['result'] === 'changed' ? 'ok' : ($entry['result'] === 'unchanged' ? 'no_changes' : 'error') ?>">
                                         <?= $entry['result'] === 'changed' ? 'Импорт' : ($entry['result'] === 'unchanged' ? 'Без изменений' : 'Ошибка') ?>

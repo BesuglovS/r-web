@@ -67,11 +67,15 @@ if (!empty($result['cleanup']['removed_dates'])) {
 }
 
 if ($result['last_error'] !== null) {
-    $sent = send_error_email([$result['last_error']]);
-    if ($sent) {
-        echo "Уведомление об ошибке последнего источника отправлено на email.\n";
-    } else {
-        echo "Не удалось отправить email-уведомление (ADMIN_EMAIL не настроен).\n";
+    try {
+        $sent = send_error_email([$result['last_error']]);
+        if ($sent) {
+            echo "Уведомление об ошибке последнего источника отправлено на email.\n";
+        } else {
+            echo "Не удалось отправить email-уведомление (ADMIN_EMAIL не настроен).\n";
+        }
+    } catch (Throwable $e) {
+        echo "Ошибка отправки email-уведомления: " . $e->getMessage() . "\n";
     }
 }
 

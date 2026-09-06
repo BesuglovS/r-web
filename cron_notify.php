@@ -68,8 +68,8 @@ function send_error_email(array $errors): bool
     $body .= "Автоматическое уведомление от cron_import.php\n";
 
     $headers = [
-        'From: r-web@nayanovaacademy.ru',
-        'Content-Type: text/plain; charset=UTF-8',
+        'From' => 'r-web@nayanovaacademy.ru',
+        'Content-Type' => 'text/plain; charset=UTF-8',
     ];
 
     $sent = mail($adminEmail, $subject, $body, $headers);
