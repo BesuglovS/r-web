@@ -85,12 +85,15 @@ function renderCards(lessons, mode, nowStatus) {
 }
 function renderTable(lessons, mode, nowStatus) {
     if (!lessons.length) return '';
-    const hdr1 = mode === 'time' ? 'Класс' : 'Предмет';
-    const hdr2 = mode === 'time' ? 'Предмет' : 'Класс';
     let h = '<table class="schedule-table"><thead><tr>';
     h += '<th class="col-num">№</th><th class="col-time">Время</th>';
-    h += `<th>${hdr1}</th><th class="col-subject">${hdr2}</th>`;
-    h += '<th class="col-extra">Учитель</th><th class="col-room">Каб.</th>';
+    h += '<th class="col-subject">Предмет</th>';
+    if (mode === 'time') {
+        h += '<th class="col-extra">Учитель</th>';
+    } else {
+        h += '<th>Класс</th>';
+    }
+    h += '<th class="col-room">Каб.</th>';
     h += '</tr></thead><tbody>';
     for (let i = 0; i < lessons.length; i++) {
         const l = lessons[i];
@@ -100,20 +103,20 @@ function renderTable(lessons, mode, nowStatus) {
         h += `<tr${rowCls}>`;
         h += `<td class="col-num">${esc(String(l.lesson_num))}</td>`;
         h += `<td class="col-time">${esc(l.time_start)}–${esc(l.time_end)}</td>`;
+        h += `<td class="col-subject">${subj}</td>`;
         if (mode === 'time') {
-            h += `<td>${esc(l.class_name)}</td><td class="col-subject">${subj}</td>`;
+            h += `<td class="col-extra">${esc(l.teacher)}</td>`;
         } else {
-            h += `<td class="col-subject">${subj}</td><td>${esc(l.class_name)}</td>`;
+            h += `<td>${esc(l.class_name)}</td>`;
         }
-        h += `<td class="col-extra">${esc(l.teacher)}</td>`;
         h += `<td class="col-room">${esc(l.room)}</td></tr>`;
 
         if (nowStatus && nowStatus.type === 'break' && nowStatus.after === i) {
-            h += `<tr class="row-break"><td colspan="6"><div class="break-now">сейчас перерыв</div></td></tr>`;
+            h += `<tr class="row-break"><td colspan="5"><div class="break-now">сейчас перерыв</div></td></tr>`;
         }
     }
     if (nowStatus && nowStatus.type === 'done') {
-        h += `<tr class="row-done"><td colspan="6"><div class="day-done">все уроки прошли</div></td></tr>`;
+        h += `<tr class="row-done"><td colspan="5"><div class="day-done">все уроки прошли</div></td></tr>`;
     }
     return h + '</tbody></table>';
 }
