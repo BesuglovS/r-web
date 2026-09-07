@@ -27,6 +27,16 @@
   --text3:#94a3b8;
   --accent:#2563eb;
   --accent2:#1d4ed8;
+  --ok:#16a34a;
+  --err:#dc2626;
+}
+
+/* Светлая тема: подсветка текущего урока (в тёмной — зелёный на тёмном) */
+[data-theme="light"] .schedule-table .row-now td{
+  background:rgba(22,163,74,.1);
+}
+[data-theme="light"] .lesson-now{
+  background:rgba(22,163,74,.12);
 }
 
 body{

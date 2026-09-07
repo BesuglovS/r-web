@@ -4,16 +4,27 @@
  * Пароль читается из переменной окружения ADMIN_PASS или .env файла.
  */
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_set_cookie_params([
-        'lifetime' => 0,
-        'path'     => '/',
-        'httponly' => true,
-        'samesite' => 'Lax',
-        // Сайт полностью HTTPS (nginx редиректит 80 → 443)
-        'secure'   => true,
-    ]);
-    session_start();
+// load_env_value() — единый парсер .env живёт в db.php
+require_once __DIR__ . '/db.php';
+
+/**
+ * Стартует сессию с правильными cookie-параметрами.
+ * Сессия нужна ТОЛЬКО для админ-функций (логин, CSRF) — публичные страницы
+ * и API её не создают (не плодим файлы сессий и Set-Cookie для анонимов).
+ */
+function ensure_session(): void
+{
+    if (session_status() === PHP_SESSION_NONE) {
+        session_set_cookie_params([
+            'lifetime' => 0,
+            'path'     => '/',
+            'httponly' => true,
+            'samesite' => 'Lax',
+            // Сайт полностью HTTPS (nginx редиректит 80 → 443)
+            'secure'   => true,
+        ]);
+        session_start();
+    }
 }
 
 function get_admin_password(): string
@@ -22,23 +33,11 @@ function get_admin_password(): string
     $pass = getenv('ADMIN_PASS');
     if ($pass !== false && $pass !== '') return $pass;
 
-    // 2. Try .env рядом с проектом (на сервере это public/.env),
-    //    затем на уровень выше (для схем, где .env вне docroot)
-    foreach ([dirname(__DIR__), dirname(__DIR__, 2)] as $env_path) {
-        $env_file = $env_path . '/.env';
-        if (!file_exists($env_file)) continue;
-        $lines = file($env_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if ($line === '' || $line[0] === '#') continue;
-            if (preg_match('/^ADMIN_PASS\s*=\s*(.+)$/', $line, $m)) {
-                return trim($m[1]);
-            }
-        }
-    }
-
+    // 2. .env рядом с проектом (на сервере это public/.env),
+    //    затем на уровень выше (для схем, где .env вне docroot).
+    //    Парсинг — через единый load_env_value() из db.php.
     // 3. Пароль не настроен — логин невозможен (никаких дефолтов в коде)
-    return '';
+    return (string)(load_env_value('ADMIN_PASS') ?? '');
 }
 
 /**
@@ -50,6 +49,9 @@ function verify_admin_password(string $password, string $correct): bool
     if (preg_match('/^\$(2y|2b|2a|argon2i|argon2id)\$/', $correct)) {
         return password_verify($password, $correct);
     }
+    // Plaintext-пароль в .env — работаем, но напоминаем в лог, что нужно
+    // заменить на password_hash('...', PASSWORD_BCRYPT)
+    error_log('[auth] ВНИМАНИЕ: ADMIN_PASS хранится как plaintext — замените на bcrypt-хеш (см. AGENTS.MD)');
     return hash_equals($correct, $password);
 }
 
@@ -94,56 +96,123 @@ function is_admin_logged_in(): bool
  * Простой файловый throttle неудачных логинов по IP.
  * Сессионного ограничения недостаточно: атакующий сбрасывает cookie на каждый запрос.
  * Хранит счётчик в tmp: последние 15 минут, максимум 10 попыток.
+ * Чтение и запись под flock — без гонок при параллельных запросах.
  */
+function ip_login_state_file(): string
+{
+    return sys_get_temp_dir() . '/r-web-login-throttle.json';
+}
+
+/**
+ * Читает и изменяет JSON-состояние под эксклюзивной блокировкой файла.
+ * Общий примитив для throttle логина и rate-limit API.
+ */
+function with_locked_state(string $file, callable $fn): void
+{
+    // 'c+' = открыть для чтения И записи, создать если не существует, указатель в начало
+    $fp = @fopen($file, 'c+');
+    if ($fp === false) {
+        return;
+    }
+    if (!flock($fp, LOCK_EX)) {
+        fclose($fp);
+        return;
+    }
+    $raw = stream_get_contents($fp);
+    $state = json_decode((string)$raw, true);
+    if (!is_array($state)) {
+        $state = [];
+    }
+    $fn($state);
+    ftruncate($fp, 0);
+    rewind($fp);
+    fwrite($fp, json_encode($state));
+    fflush($fp);
+    flock($fp, LOCK_UN);
+    fclose($fp);
+}
+
+function ip_login_with_lock(callable $fn): void
+{
+    with_locked_state(ip_login_state_file(), $fn);
+}
+
 function ip_login_throttle(): bool
 {
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $file = sys_get_temp_dir() . '/r-web-login-throttle.json';
-    $state = [];
-    if (file_exists($file)) {
-        $state = json_decode((string)file_get_contents($file), true) ?: [];
-    }
+    $allowed = true;
     $now = time();
-    foreach ($state as $k => $v) {
-        if (($v['ts'] ?? 0) < $now - 900) unset($state[$k]);
-    }
-    $entry = $state[$ip] ?? ['ts' => $now, 'fails' => 0];
-    if (($now - $entry['ts']) > 900) {
-        $entry = ['ts' => $now, 'fails' => 0];
-    }
-    if ($entry['fails'] >= 10) {
-        return false; // превышен лимит — логин заблокирован на 15 минут
-    }
-    return true;
+    ip_login_with_lock(function (array &$state) use ($ip, $now, &$allowed) {
+        foreach ($state as $k => $v) {
+            if (($v['ts'] ?? 0) < $now - 900) unset($state[$k]);
+        }
+        $entry = $state[$ip] ?? ['ts' => $now, 'fails' => 0];
+        if (($now - $entry['ts']) > 900) {
+            $entry = ['ts' => $now, 'fails' => 0];
+        }
+        if ($entry['fails'] >= 10) {
+            $allowed = false; // превышен лимит — логин заблокирован на 15 минут
+        }
+    });
+    return $allowed;
 }
 
 function ip_login_record_failure(): void
 {
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $file = sys_get_temp_dir() . '/r-web-login-throttle.json';
-    $state = [];
-    if (file_exists($file)) {
-        $state = json_decode((string)file_get_contents($file), true) ?: [];
-    }
     $now = time();
-    $entry = $state[$ip] ?? ['ts' => $now, 'fails' => 0];
-    if (($now - $entry['ts']) > 900) {
-        $entry = ['ts' => $now, 'fails' => 0];
-    }
-    $entry['fails']++;
-    $entry['ts'] = $now;
-    $state[$ip] = $entry;
-    @file_put_contents($file, json_encode($state), LOCK_EX);
+    ip_login_with_lock(function (array &$state) use ($ip, $now) {
+        $entry = $state[$ip] ?? ['ts' => $now, 'fails' => 0];
+        if (($now - $entry['ts']) > 900) {
+            $entry = ['ts' => $now, 'fails' => 0];
+        }
+        $entry['fails']++;
+        $entry['ts'] = $now;
+        $state[$ip] = $entry;
+    });
 }
 
 function ip_login_clear(): void
 {
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $file = sys_get_temp_dir() . '/r-web-login-throttle.json';
-    if (file_exists($file)) {
-        $state = json_decode((string)file_get_contents($file), true) ?: [];
+    ip_login_with_lock(function (array &$state) use ($ip) {
         unset($state[$ip]);
-        @file_put_contents($file, json_encode($state), LOCK_EX);
+    });
+}
+
+/**
+ * Лёгкий rate-limit публичных API-эндпоинтов по IP.
+ * Файловый счётчик под flock (тот же примитив, что throttle логина).
+ * Скользящее окно $window секунд, максимум $limit запросов.
+ * При превышении — 429 и завершение запроса.
+ */
+function api_rate_limit(int $limit = 240, int $window = 60): void
+{
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $file = sys_get_temp_dir() . '/r-web-api-rate.json';
+    $now = time();
+    $allowed = true;
+    with_locked_state($file, function (array &$state) use ($ip, $now, $limit, $window, &$allowed) {
+        // Чистим давно протухшие записи, чтобы файл не рос бесконечно
+        foreach ($state as $k => $v) {
+            if (($now - (int)($v['window'] ?? 0)) >= $window * 10) {
+                unset($state[$k]);
+            }
+        }
+        $entry = $state[$ip] ?? ['window' => $now, 'count' => 0];
+        if (($now - (int)$entry['window']) >= $window) {
+            $entry = ['window' => $now, 'count' => 0];
+        }
+        $entry['count']++;
+        $state[$ip] = $entry;
+        $allowed = $entry['count'] <= $limit;
+    });
+    if (!$allowed) {
+        http_response_code(429);
+        header('Retry-After: ' . $window);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['error' => 'Слишком много запросов, попробуйте позже']);
+        exit;
     }
 }
 
@@ -169,6 +238,9 @@ function admin_login(string $password): bool
         $_SESSION['admin_logged_in'] = true;
         $_SESSION['login_time'] = time();
         unset($_SESSION['login_fails']);
+        // Ротация CSRF-токена вместе с ID сессии: токен, известный до логина,
+        // не должен быть валиден после него
+        unset($_SESSION['csrf_token']);
         ip_login_clear();
         return true;
     }
@@ -179,12 +251,18 @@ function admin_login(string $password): bool
 
 function admin_logout(): void
 {
-    $_SESSION['admin_logged_in'] = false;
+    $_SESSION = [];
+    // Удаляем сессионную cookie, чтобы браузер не отправлял её повторно
+    if (ini_get('session.use_cookies')) {
+        $p = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000, $p['path'], $p['domain'], $p['secure'], $p['httponly']);
+    }
     session_destroy();
 }
 
 function require_admin(): void
 {
+    ensure_session();
     if (!is_admin_logged_in()) {
         // Show login form
         if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {

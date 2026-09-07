@@ -9,24 +9,34 @@
  * GET ?action=schedule&class=X&date=Y — расписание класса на дату
  * GET ?action=schedule&teacher=X&date=Y — расписание учителя на дату
  * GET ?action=history              — история изменений
- * GET ?action=import_log           — история импортов (требует авторизации)
+ * GET ?action=import_log           — журнал импортов (требует авторизации)
+ * GET ?action=check_log            — журнал проверок источников (требует авторизации)
  * GET ?action=sources              — список источников расписаний
  * GET ?action=last_import          — последний импорт (дата + статус)
  * POST ?action=import              — импорт (требует авторизации)
  * POST ?action=source_add          — добавить источник (требует авторизации)
  * POST ?action=source_delete       — удалить источник (требует авторизации)
  * POST ?action=source_toggle       — вкл/выкл источник (требует авторизации)
+ * POST ?action=source_edit         — изменить источник (требует авторизации)
  * POST ?action=import_all          — импорт по всем активным (требует авторизации)
  */
 
 header('Content-Type: application/json; charset=utf-8');
 
 require_once __DIR__ . '/src/db.php';
-// auth.php настраивает параметры сессионной cookie (HttpOnly/Secure/SameSite)
-// и стартует сессию — обязательно ДО любого вывода
+// auth.php подключается ради ensure_session()/api_rate_limit() — сессия для
+// публичных эндпоинтов НЕ стартует (см. api_require_admin)
 require_once __DIR__ . '/src/auth.php';
 
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
+
+// Rate-limit публичных GET-эндпоинтов (справочники, расписание, история).
+// Админ-эндпоинты защищены сессией и не лимитируются.
+$admin_actions = ['import_log', 'check_log', 'sources', 'import', 'import_all',
+                  'source_add', 'source_delete', 'source_toggle', 'source_edit'];
+if (!in_array($action, $admin_actions, true)) {
+    api_rate_limit();
+}
 
 /**
  * Единая точка авторизации для админ-эндпоинтов API.
@@ -34,9 +44,16 @@ $action = $_GET['action'] ?? $_POST['action'] ?? '';
  */
 function api_require_admin(bool $is_post): void
 {
-    // Сессия уже стартована в src/auth.php с правильными cookie-параметрами
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
+    // Сессия нужна только здесь — публичные эндпоинты её не создают
+    ensure_session();
+    // Метод фиксируем для всех админ-эндпоинтов: GET-списки — только GET,
+    // POST-действия — только POST
+    $expected = $is_post ? 'POST' : 'GET';
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== $expected) {
+        http_response_code(405);
+        header('Allow: ' . $expected);
+        echo json_encode(['error' => 'Метод не поддерживается, используйте ' . $expected]);
+        exit;
     }
     if (empty($_SESSION['admin_logged_in'])) {
         http_response_code(403);
@@ -72,6 +89,28 @@ try {
         exit;
     }
     init_db($pdo);
+
+    // HTTP-кэширование публичных GET-ответов: справочники (классы/учителя/
+    // недели/даты) меняются раз в день, расписание — раз в несколько минут.
+    // Публичные админ-эндпоинты и POST — всегда без кэша.
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
+        $cache_ttl = [
+            'classes'     => 300,
+            'teachers'    => 300,
+            'weeks'       => 300,
+            'dates'       => 300,
+            'schedule'    => 60,
+            'history'     => 60,
+            'last_import' => 30,
+        ];
+        if (isset($cache_ttl[$action])) {
+            header('Cache-Control: public, max-age=' . $cache_ttl[$action]);
+        } else {
+            header('Cache-Control: no-store');
+        }
+    } else {
+        header('Cache-Control: no-store');
+    }
 
     switch ($action) {
         case 'classes':
@@ -130,6 +169,10 @@ try {
             $class = $_GET['class'] ?? null;
             $teacher = $_GET['teacher'] ?? null;
             $date = $_GET['date'] ?? null;
+            // Защита от array-параметров (?class[]=x) — иначе PDO бросит исключение
+            if (!is_string($class)) $class = null;
+            if (!is_string($teacher)) $teacher = null;
+            if (!is_string($date)) $date = null;
 
             // Требуем хотя бы один фильтр — иначе выгрузится вся таблица
             if (!$class && !$teacher && !$date) {
@@ -169,18 +212,35 @@ try {
             $stmt->execute($params);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-            // Время последнего изменения именно этого расписания (класс/учитель + дата)
-            $row_imported_at = null;
-            foreach ($rows as $r) {
-                if ($r['imported_at'] !== null && ($row_imported_at === null || $r['imported_at'] > $row_imported_at)) {
-                    $row_imported_at = $r['imported_at'];
+            // Время последнего изменения именно этого расписания (класс/учитель + дата).
+            // Источник истины — schedule_history.changed_at: imported_at строк перезатирается
+            // при каждом импорте файла целиком и не отражает «когда показываемое расписание
+            // реально изменилось». Поэтому берём максимум changed_at по истории, ограниченный
+            // той же датой и прошлым классом/учителем. Фолбек — максимум imported_at показанных строк
+            $view_imported = null;
+            if ($date) {
+                $h_conds = ['date = :date'];
+                $h_params = [':date' => $date];
+                if ($class) { $h_conds[] = 'class_name = :class'; $h_params[':class'] = $class;}
+                if ($teacher) { $h_conds[] = 'teacher = :teacher'; $h_params[':teacher'] = $teacher;}
+                $h_sql = "SELECT MAX(changed_at) FROM schedule_history WHERE " . implode(' AND ', $h_conds);
+                $h_stmt = $pdo->prepare($h_sql);
+                $h_stmt->execute($h_params);
+                $hist_max = $h_stmt->fetchColumn();
+                if ($hist_max) $view_imported = $hist_max;
+            }
+            if ($view_imported === null) {
+                foreach ($rows as $r) {
+                    if ($r['imported_at'] !== null && ($view_imported === null || $r['imported_at'] > $view_imported)) {
+                        $view_imported = $r['imported_at'];
+                    }
                 }
             }
 
             echo json_encode([
                 'schedule'    => $rows,
                 // Время хранится в UTC — отдаём в самарском
-                'imported_at' => $row_imported_at !== null ? utc_to_samara($row_imported_at) : null,
+                'imported_at' => $view_imported !== null ? utc_to_samara($view_imported) : null,
             ]);
             break;
 
@@ -194,8 +254,10 @@ try {
                     break;
                 }
                 $week_dt = new DateTime($week);
+                // +6 дней вместо 'sunday this week': у PHP «sunday this week»
+                // для воскресенья возвращает воскресенье СЛЕДУЮЩЕЙ недели
                 $sunday = clone $week_dt;
-                $sunday->modify('sunday this week');
+                $sunday->modify('+6 days');
                 $stmt = $pdo->prepare("SELECT DISTINCT date, day_of_week FROM schedule WHERE date >= ? AND date <= ? ORDER BY date");
                 $stmt->execute([$week_dt->format('Y-m-d'), $sunday->format('Y-m-d')]);
             } else {
@@ -206,10 +268,12 @@ try {
             break;
 
         case 'history':
-            // С фильтром по классу/учителю/дате — плоский список изменений
-            $h_class = $_GET['class'] ?? '';
-            $h_teacher = $_GET['teacher'] ?? '';
-            $h_date = $_GET['date'] ?? '';
+            // С фильтром по классу/учителю/дате — плоский список изменений.
+            // is_string(): ?class[]=x превратил бы значение в массив и уронил
+            // PDO в исключение (HTTP 500), как это уже защищено в 'schedule'.
+            $h_class = isset($_GET['class']) && is_string($_GET['class']) ? $_GET['class'] : '';
+            $h_teacher = isset($_GET['teacher']) && is_string($_GET['teacher']) ? $_GET['teacher'] : '';
+            $h_date = isset($_GET['date']) && is_string($_GET['date']) ? $_GET['date'] : '';
             if ($h_class !== '' || $h_teacher !== '' || $h_date !== '') {
                 $cond = [];
                 $h_params = [];
@@ -372,6 +436,23 @@ try {
 
             require_once __DIR__ . '/src/import.php';
             $result = toggle_source($id);
+            echo json_encode($result);
+            break;
+
+        case 'source_edit':
+            api_require_admin(true);
+
+            $id = (int)($_POST['id'] ?? 0);
+            $url = trim($_POST['url'] ?? '');
+            $label = trim($_POST['label'] ?? '');
+            if ($id <= 0 || $url === '') {
+                http_response_code(400);
+                echo json_encode(['error' => 'Неверные данные']);
+                break;
+            }
+
+            require_once __DIR__ . '/src/import.php';
+            $result = edit_source($id, $url, $label);
             echo json_encode($result);
             break;
 

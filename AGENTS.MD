@@ -15,7 +15,9 @@
 ```
 ├── index.html          # Главная — расписание учеников
 ├── teachers.html       # Расписание учителей
+├── history.php         # Страница «Изменения расписания» (публичная)
 ├── admin.php           # Админ-панель (вход + импорт + управление источниками)
+├── admin.js            # Клиентская логика админ-панели (вынесена из admin.php ради CSP)
 ├── api.php             # JSON API (вся бэкенд-логика)
 ├── app.js              # Фронтенд-логика (fetch, рендеринг, тема)
 ├── style.css           # Вся стилистика (тёмная/светлая тема, адаптив)
@@ -31,7 +33,8 @@
 ├── favicon.svg         # SVG favicon
 ├── .env                # Конфиг деплоя + пароль админа (bcrypt-хеш)
 ├── .gitignore
-└── link.txt            # Ссылка на XLSX на Яндекс Диске (мигрирует в БД)
+├── link.txt            # Ссылка на XLSX на Яндекс Диске (мигрирует в БД)
+└── tests/              # Тесты: parser_test.php, smoke_db.php (`php tests/parser_test.php`)
 ```
 
 ### Database (SQLite)
@@ -45,7 +48,9 @@
 - **`schedule_sources`** — источники XLSX с Яндекс Диска (md5/modified/size, is_active, last_error)
 - **`check_log`** — журнал лёгких проверок метаданных (cron каждые 5 минут)
 
-Очистка: `prune_old_data($pdo, 10)` удаляет записи всех логов/истории старше **10 дней** (вызывается из `do_import()` и `do_check_all()`).
+Очистка: `prune_old_data($pdo, 10)` удаляет журнал импортов и проверок старше **10 дней**, историю изменений — старше **90 дней** (вызывается из `do_import()` и `do_check_all()`).
+
+В `schedule_sources` колонка `last_dates` (JSON) хранит даты, покрытые последним успешным полным импортом источника — нужна, чтобы unchanged-источник подтверждал свои даты в автоочистке `cleanup_stale_dates()`.
 
 Индексы: `idx_schedule_class`, `idx_schedule_teacher`, `idx_schedule_date`, `idx_schedule_date_class`, `idx_schedule_date_time`, `idx_history_version`, `idx_history_date`, `idx_history_changed_at`, `idx_import_log_imported_at`, `idx_check_log_checked_at`
 
@@ -65,9 +70,9 @@
 | `sources` | GET | Да | Список источников |
 | `import` | POST | Да + CSRF | Импорт одного источника |
 | `import_all` | POST | Да + CSRF | Импорт всех активных источников |
-| `source_add` / `source_delete` / `source_toggle` | POST | Да + CSRF | Управление источниками |
+| `source_add` / `source_delete` / `source_toggle` / `source_edit` | POST | Да + CSRF | Управление источниками |
 
-Схема миграций: `PRAGMA user_version` (3 = актуальная). Транзакции импорта — `BEGIN IMMEDIATE` (защита от гонки версий истории при параллельных импортах).
+Схема миграций: `PRAGMA user_version` (4 = актуальная). Транзакции импорта — `BEGIN IMMEDIATE` (защита от гонки версий истории при параллельных импортах). Публичные GET-эндпоинты ограничены rate-limit'ом по IP (240 запросов/мин, файл под flock).
 
 ## Development Commands
 
@@ -102,16 +107,19 @@ php -S localhost:8000
 - **Безопасность:**
   - SQL-инъекции: защищены через prepared statements
   - XSS: `htmlspecialchars()` в PHP, `esc()` (textContent) в JS; редактирование источников в admin.php — через DOM API
-  - Авторизация: `password_verify()` (bcrypt/argon2) или `hash_equals()` для plaintext; throttle неудачных логинов по IP (10 попыток / 15 мин) + по сессии; сессия админа истекает через 12 часов
-  - CSRF: токен обязателен для всех POST (логин, admin.php, API)
+  - Авторизация: `password_verify()` (bcrypt/argon2) или `hash_equals()` для plaintext (с warning в лог); throttle неудачных логинов по IP (10 попыток / 15 мин, под flock) + по сессии; сессия админа истекает через 12 часов. Пароль хранится ТОЛЬКО как bcrypt-хеш в `.env` — plaintext не коммитится в репозиторий
+  - CSRF: токен обязателен для всех POST (логин, admin.php, API), ротируется при логине
+  - Сессия стартует только для админ-функций (`ensure_session()`) — публичные страницы и API файлов сессий не создают
+  - CSP: `script-src 'self'` (без unsafe-inline — весь JS во внешних файлах app.js/admin.js); для admin.php таймаут FPM увеличен до 300s
   - Сессионные cookie: `HttpOnly`, `Secure`, `SameSite=Lax` (src/auth.php, используются и в api.php)
   - Ошибки API: детали — в error_log, клиенту — обобщённое сообщение
-  - SSRF: URL только на Яндекса (allowlist хостов), ссылка на скачивание — только HTTPS yandex
+  - SSRF: URL только на Яндекса (allowlist хостов), ссылка на скачивание — только HTTPS на домены `*.yandex.net`, `*.yandex.ru`, `yadi.sk` (проверка суффикса хоста)
+  - cron-скрипты: nginx блокирует веб-доступ (`location ^~ /cron_` ДО `\.php$`) + проверка `php_sapi_name() === 'cli'` + flock против параллельных запусков
   - Nginx блокирует доступ к `/src/`, `/cron_*` и dotfiles; security-заголовки (HSTS, XFO, nosniff, Referrer-Policy, CSP) дублируются в location статики (особенность наследования add_header); включён gzip
 
 ## Security Notes
 
-- `.env` содержит bcrypt-хеш пароля админа (пароль `nayanova2026` — смените на свой и перегенерируйте хеш), SSH-хост/юзер — **не удалять из репозитория** (это сделано намеренно)
+- `.env` содержит bcrypt-хеш пароля админа (смените на свой: `php -r "echo password_hash('ваш-пароль', PASSWORD_BCRYPT);"` и замените значение `ADMIN_PASS`), SSH-хост/юзер — **не удалять из репозитория** (это сделано намеренно). Plaintext пароля нигде не хранится.
 - Nginx блокирует доступ к `/src/`, `/cron_*` и файлам с префиксом `.`
 
 ## Common Tasks

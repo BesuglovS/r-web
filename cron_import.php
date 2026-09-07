@@ -15,6 +15,20 @@ require_once __DIR__ . '/src/db.php';
 require_once __DIR__ . '/src/import.php';
 require_once __DIR__ . '/cron_notify.php';
 
+// Защита от исполнения через веб (даже если nginx-конфиг ошибочно пропустит)
+if (php_sapi_name() !== 'cli') {
+    http_response_code(403);
+    exit('Forbidden');
+}
+
+// Защита от параллельных запусков cron (импорт может длиться дольше 5 минут)
+$lock_file = sys_get_temp_dir() . '/r-web-cron.lock';
+$lock_fp = fopen($lock_file, 'c');
+if ($lock_fp === false || !flock($lock_fp, LOCK_EX | LOCK_NB)) {
+    echo "[" . date('Y-m-d H:i:s') . "] Предыдущий запуск ещё выполняется — пропуск.\n";
+    exit(0);
+}
+
 $date = date('Y-m-d H:i:s');
 echo "[$date] Запуск проверки источников...\n";
 
@@ -26,6 +40,13 @@ if ($pdo === null) {
 init_db($pdo);
 
 $result = do_check_all(6, $pdo);
+
+// Ежедневный бэкап БД (VACUUM INTO, ротация 7 копий в db/backups/)
+// — делается после проверки, чтобы в копию попали свежие данные
+$backup = backup_db($pdo);
+if ($backup !== null) {
+    echo "Бэкап БД: $backup\n";
+}
 
 $changed = 0;
 $unchanged = 0;
@@ -66,11 +87,11 @@ if (!empty($result['cleanup']['removed_dates'])) {
     echo "  [ОЧИСТКА] Удалены устаревшие даты: " . implode(', ', $c['removed_dates']) . " ({$c['lessons']} уроков)\n";
 }
 
-if ($result['last_error'] !== null) {
+if (!empty($result['error_details'])) {
     try {
-        $sent = send_error_email([$result['last_error']]);
+        $sent = send_error_email($result['error_details']);
         if ($sent) {
-            echo "Уведомление об ошибке последнего источника отправлено на email.\n";
+            echo "Уведомление об ошибках (" . count($result['error_details']) . ") отправлено на email.\n";
         } else {
             echo "Не удалось отправить email-уведомление (ADMIN_EMAIL не настроен).\n";
         }

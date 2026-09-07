@@ -2,8 +2,10 @@
 /**
  * Страница изменений конкретного импорта.
  * Открывается кликом по строке журнала в admin.php (вкладки «Импорты»/«Проверки»).
- * Параметр at — время импорта в UTC (Y-m-d H:i:s): для удачного импорта
- * import_log.imported_at и schedule_history.changed_at совпадают.
+ * Параметр at — время импорта в UTC (Y-m-d H:i:s). Изменения выбираются по
+ * ВЕРСИИ (уникальна на импорт), а не по точному совпадению changed_at:
+ * несколько источников, импортированных в одну секунду, делят одну метку
+ * времени — по точному совпадению их изменения смешались бы / терялись.
  */
 require_once __DIR__ . '/src/auth.php';
 require_admin();
@@ -20,11 +22,24 @@ $pdo = get_db();
 if ($pdo !== null) {
     try {
         init_db($pdo);
-        $stmt = $pdo->prepare("SELECT * FROM schedule_history WHERE changed_at = :at ORDER BY date, class_name, lesson_num");
-        $stmt->execute([':at' => $at]);
-        $changes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        // 1) находим все версии, у которых changed_at = at (обычно одна),
+        // 2) берём ВСЕ изменения этих версий — даже если часть из них
+        //    записана с чуть отличным changed_at (cleanup_stale_dates и т.п.)
+        $vstmt = $pdo->prepare("SELECT DISTINCT version FROM schedule_history WHERE changed_at = :at");
+        $vstmt->execute([':at' => $at]);
+        $versions = $vstmt->fetchAll(PDO::FETCH_COLUMN);
+
+        if (!empty($versions)) {
+            $placeholders = implode(',', array_fill(0, count($versions), '?'));
+            $stmt = $pdo->prepare(
+                "SELECT * FROM schedule_history WHERE version IN ($placeholders) ORDER BY date, class_name, lesson_num"
+            );
+            $stmt->execute($versions);
+            $changes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        }
     } catch (Exception $e) {
-        // показываем страницу без данных
+        // показываем страницу без данных, но причину оставляем в логе сервера
+        error_log('[history] ' . $e->getMessage());
     }
 }
 

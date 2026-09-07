@@ -37,7 +37,9 @@ function get_db_path(): string
 }
 
 /**
- * Читает одно значение из .env (без зависимостей).
+ * Читает одно значение из .env (единственный парсер .env в проекте —
+ * используется и из src/auth.php, и из cron_notify.php).
+ * Поддерживает комментарии, префикс export и кавычки значений.
  */
 function load_env_value(string $key): ?string
 {
@@ -48,8 +50,23 @@ function load_env_value(string $key): ?string
         foreach ($lines as $line) {
             $line = trim($line);
             if ($line === '' || $line[0] === '#') continue;
-            if (preg_match('/^' . preg_quote($key, '/') . '\s*=\s*(.+)$/', $line, $m)) {
-                return trim($m[1]);
+            if (preg_match('/^(?:export\s+)?' . preg_quote($key, '/') . '\s*=\s*(.+)$/', $line, $m)) {
+                $value = trim($m[1]);
+                // Снимаем обрамляющие кавычки ("значение" / 'значение')
+                $quoted = strlen($value) >= 2
+                    && (($value[0] === '"' && $value[-1] === '"')
+                        || ($value[0] === "'" && $value[-1] === "'"));
+                if ($quoted) {
+                    $value = substr($value, 1, -1);
+                } else {
+                    // Инлайн-комментарий вне кавычек — не часть значения
+                    // (важно для bcrypt-хешей: ' # комментарий' сломал бы логин)
+                    $hash_pos = strpos($value, ' #');
+                    if ($hash_pos !== false) {
+                        $value = rtrim(substr($value, 0, $hash_pos));
+                    }
+                }
+                return $value;
             }
         }
     }
@@ -93,10 +110,21 @@ function get_db(): ?PDO
 function init_db(PDO $pdo): void
 {
     // Инициализация схемы — дорогая; выполняем только один раз на БД.
+    // Кешируем по конкретному PDO-соединению: init_db вызывается из десятков
+    // мест за один запрос (get_sources, update_source_status, ...), и каждый
+    // раз читать PRAGMA user_version незачем.
+    static $inited = [];
+    $key = spl_object_id($pdo);
+    if (isset($inited[$key])) {
+        return;
+    }
+
     // user_version: 1 = миграция UTC выполнена, 2 = промежуточная (историческая),
-    // 3 = актуальная схема (+check_log, md5-колонки в schedule_sources).
+    // 3 = актуальная схема (+check_log, md5-колонки в schedule_sources),
+    // 4 = + колонка last_dates в schedule_sources (даты, покрытые источником).
     $ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-    if ($ver >= 3) {
+    if ($ver >= 4) {
+        $inited[$key] = true;
         return;
     }
 
@@ -194,9 +222,11 @@ function init_db(PDO $pdo): void
     migrate_timestamps_to_utc($pdo);
 
     // Поднять версию схемы (после UTC-миграции, чтобы она успела отработать на старых БД)
-    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 3) {
-        $pdo->exec('PRAGMA user_version = 3');
+    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 4) {
+        $pdo->exec('PRAGMA user_version = 4');
     }
+
+    $inited[$key] = true;
 }
 
 /**
@@ -214,6 +244,9 @@ function migrate_source_columns(PDO $pdo): void
         "ALTER TABLE schedule_sources ADD COLUMN last_md5 TEXT DEFAULT NULL",
         "ALTER TABLE schedule_sources ADD COLUMN last_modified TEXT DEFAULT NULL",
         "ALTER TABLE schedule_sources ADD COLUMN last_size INTEGER DEFAULT NULL",
+        // Даты, покрытые последним успешным полным импортом источника (JSON-массив).
+        // Нужно do_check_all(): unchanged-источник подтверждает свои даты без импорта.
+        "ALTER TABLE schedule_sources ADD COLUMN last_dates TEXT DEFAULT NULL",
     ];
     foreach ($additions as $sql) {
         if (preg_match('/ADD COLUMN (\w+)/', $sql, $m) && !isset($existing[$m[1]])) {
@@ -257,20 +290,59 @@ function utc_to_samara(?string $utc): ?string
 }
 
 /**
- * Чистка старых данных: удаляет записи истории, журнала импортов и проверок,
- * которые старше $days дней. Времена хранятся в UTC — сравниваем с UTC «сейчас».
- * Вызывается из do_check_all() при каждом запуске cron (индексы делают это дешёвым).
+ * Чистка старых данных: журналы импортов/проверок — $days дней (по умолчанию 10),
+ * история изменений расписания — дольше ($history_days, по умолчанию 90):
+ * пользователи смотрят изменения недельной давности, а таблица крошечная.
+ * Времена хранятся в UTC — сравниваем с UTC «сейчас».
+ * Вызывается из do_import() и do_check_all() (индексы делают это дешёвым).
  */
-function prune_old_data(PDO $pdo, int $days = 10): void
+function prune_old_data(PDO $pdo, int $days = 10, int $history_days = 90): void
 {
     $pdo->prepare("DELETE FROM schedule_history WHERE changed_at < datetime('now', ?)")
-        ->execute(['-' . $days . ' days']);
+        ->execute(['-' . $history_days . ' days']);
     $pdo->prepare("DELETE FROM import_log WHERE imported_at < datetime('now', ?)")
         ->execute(['-' . $days . ' days']);
     $pdo->prepare("DELETE FROM check_log WHERE checked_at < datetime('now', ?)")
         ->execute(['-' . $days . ' days']);
 }
 
+/**
+ * Ежедневный бэкап БД через VACUUM INTO (sqlite >= 3.27, PHP 8.1 его включает).
+ * Хранит до $keep копий в каталоге db/backups/ рядом с файлом БД.
+ * Вызывается из cron_import.php. Возвращает путь к свежему бэкапу либо null.
+ */
+function backup_db(PDO $pdo, int $keep = 7): ?string
+{
+    try {
+        $backup_dir = dirname(get_db_path()) . '/backups';
+        if (!is_dir($backup_dir) && !@mkdir($backup_dir, 0775, true)) {
+            return null;
+        }
+        $dest = $backup_dir . '/schedule-' . gmdate('Y-m-d') . '.db';
+
+        // Один бэкап в день: если уже есть — не перезаписываем
+        if (!file_exists($dest)) {
+            $pdo->exec("VACUUM INTO " . $pdo->quote($dest));
+        }
+
+        // Ротация: удаляем самые старые сверх $keep
+        $backups = glob($backup_dir . '/schedule-*.db') ?: [];
+        sort($backups);
+        while (count($backups) > $keep) {
+            @unlink(array_shift($backups));
+        }
+
+        return $dest;
+    } catch (Exception $e) {
+        error_log('[backup_db] ' . $e->getMessage());
+        return null;
+    }
+}
+
+/**
+ * DEPRECATED: разовая миграция link.txt в БД. Источники теперь управляются
+ * через админ-панель; функция оставлена только для старых инсталляций.
+ */
 function migrate_link_txt(PDO $pdo): void
 {
     $count = $pdo->query("SELECT COUNT(*) FROM schedule_sources")->fetchColumn();

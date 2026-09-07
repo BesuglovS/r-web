@@ -12,7 +12,12 @@ require_once __DIR__ . '/src/import.php';
 
 // utc_to_samara() теперь в src/db.php: хранит UTC, отображает самарское время
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+// POST-логин обрабатывается внутри require_admin() (src/auth.php): после
+// успешного логина он делает session_regenerate_id() и РОТИРУЕТ csrf-токен.
+// Выполнение продолжается здесь с тем же POST-запросом — это НЕ запрос
+// действия, поэтому пропускаем обработку действий (иначе csrf_verify()
+// ложно падал бы на свежесброшенном токене: «Сессия устарела…»).
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
     if (!csrf_verify()) {
         $message = 'Сессия устарела, обновите страницу и попробуйте снова';
         $message_type = 'error';
@@ -24,7 +29,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             try {
                 $result = do_import($url);
-                $message = "Импорт завершён: {$result['lessons']} уроков ({$result['date']})";
+                $lessons = (int)($result['lessons'] ?? 0);
+                $date = (string)($result['date'] ?? '');
+                $message = "Импорт завершён: {$lessons} уроков ({$date})";
                 $message_type = 'success';
             } catch (Exception $e) {
                 $message = 'Ошибка: ' . $e->getMessage();
@@ -87,12 +94,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (isset($_POST['import_all'])) {
         try {
             $result = do_import_all();
-            $msg = "Импорт завершён: {$result['success']}/{$result['total']} успешно";
-            if ($result['errors'] > 0) {
-                $msg .= " ({$result['errors']} ошибок)";
+            $total = (int)($result['total'] ?? 0);
+            $success = (int)($result['success'] ?? 0);
+            $errors = (int)($result['errors'] ?? 0);
+            $msg = "Импорт завершён: {$success}/{$total} успешно";
+            if ($errors > 0) {
+                $msg .= " ({$errors} ошибок)";
             }
             $message = $msg;
-            $message_type = $result['errors'] > 0 ? 'error' : 'success';
+            $message_type = $errors > 0 ? 'error' : 'success';
         } catch (Exception $e) {
             $message = 'Ошибка: ' . $e->getMessage();
             $message_type = 'error';
@@ -160,6 +170,7 @@ foreach ($log as $entry) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Админ — Импорт расписания</title>
+    <meta name="csrf-token" content="<?= htmlspecialchars(csrf_token()) ?>">
     <link rel="icon" href="favicon.ico?v=2" type="image/x-icon">
     <link rel="icon" href="favicon.svg?v=2" type="image/svg+xml">
     <link rel="apple-touch-icon" href="apple-touch-icon.png?v=2">
@@ -439,7 +450,6 @@ foreach ($log as $entry) {
                                 <td>
                                     <div class="source-actions">
                                         <button type="button" class="btn-sm btn-edit"
-                                                onclick="startEdit(this)"
                                                 data-url="<?= htmlspecialchars($src['url']) ?>"
                                                 data-label="<?= htmlspecialchars($src['label']) ?>">Ред.</button>
                                         <form method="POST" style="display:inline;">
@@ -450,8 +460,7 @@ foreach ($log as $entry) {
                                                 <?= (int)$src['is_active'] ? 'Выкл' : 'Вкл' ?>
                                             </button>
                                         </form>
-                                        <form method="POST" style="display:inline;"
-                                              onsubmit="return confirm('Удалить источник?')">
+                                        <form method="POST" style="display:inline;" class="form-delete-source">
                                             <?= csrf_field() ?>
                                             <input type="hidden" name="source_id" value="<?= (int)$src['id'] ?>">
                                             <button type="submit" name="delete_source" value="1"
@@ -467,8 +476,7 @@ foreach ($log as $entry) {
 
             <form method="POST">
                 <?= csrf_field() ?>
-                <button type="submit" name="import_all" value="1" class="btn-import-all"
-                        onclick="this.disabled=true;this.textContent='Импорт...'">
+                <button type="submit" name="import_all" value="1" class="btn-import-all">
                     Импортировать последние 2 источника
                 </button>
             </form>
@@ -495,7 +503,7 @@ foreach ($log as $entry) {
                         </thead>
                         <tbody>
                             <?php foreach ($log as $entry): $can_open = $entry['status'] === 'ok'; ?>
-                                <tr<?php if ($can_open): ?> class="clickable" title="Показать изменения этого импорта" onclick="location.href='history.php?at=<?= rawurlencode($entry['imported_at']) ?>'"<?php endif; ?>>
+                                <tr<?php if ($can_open): ?> class="clickable" title="Показать изменения этого импорта" data-href="history.php?at=<?= htmlspecialchars(rawurlencode($entry['imported_at'])) ?>"<?php endif; ?>>
                                     <td><?= htmlspecialchars(utc_to_samara($entry['imported_at'])) ?></td>
                                     <td><?= (int)$entry['lessons_count'] ?></td>
                                     <td class="status-<?= htmlspecialchars($entry['status']) ?>">
@@ -534,7 +542,7 @@ foreach ($log as $entry) {
                                     ? resolve_import_for_check($imports_by_url, $entry['url'], $entry['checked_at'])
                                     : null;
                                 ?>
-                                <tr<?php if ($import_at): ?> class="clickable" title="Показать изменения этого импорта" onclick="location.href='history.php?at=<?= rawurlencode($import_at) ?>'"<?php endif; ?>>
+                                <tr<?php if ($import_at): ?> class="clickable" title="Показать изменения этого импорта" data-href="history.php?at=<?= htmlspecialchars(rawurlencode($import_at)) ?>"<?php endif; ?>>
                                     <td><?= htmlspecialchars(utc_to_samara($entry['checked_at'])) ?></td>
                                     <td class="status-<?= $entry['result'] === 'changed' ? 'ok' : ($entry['result'] === 'unchanged' ? 'no_changes' : 'error') ?>">
                                         <?= $entry['result'] === 'changed' ? 'Импорт' : ($entry['result'] === 'unchanged' ? 'Без изменений' : 'Ошибка') ?>
@@ -555,113 +563,6 @@ foreach ($log as $entry) {
         </div>
     </div>
 
-    <script>
-    document.getElementById('importForm').addEventListener('submit', function() {
-        var btn = document.getElementById('importBtn');
-        btn.disabled = true;
-        btn.textContent = 'Импорт...';
-    });
-
-    var CSRF_TOKEN = '<?= csrf_token() ?>';
-
-    function startEdit(btn) {
-        var row = btn.closest('tr');
-        var id = row.dataset.id;
-        var url = btn.dataset.url;
-        var label = btn.dataset.label;
-
-        row.dataset.origUrl = url;
-        row.dataset.origLabel = label;
-
-        // Инпуты создаём через DOM API — значение не попадает в HTML-строку
-        // (защита от XSS даже при ошибке экранирования)
-        var labelCell = row.querySelector('.cell-label');
-        var urlCell = row.querySelector('.cell-url');
-        labelCell.innerHTML = '';
-        urlCell.innerHTML = '';
-        var labelInput = document.createElement('input');
-        labelInput.className = 'edit-input';
-        labelInput.name = 'source_label';
-        labelInput.value = label;
-        labelCell.appendChild(labelInput);
-        var urlInput = document.createElement('input');
-        urlInput.className = 'edit-input';
-        urlInput.name = 'source_url';
-        urlInput.value = url;
-        urlInput.style.maxWidth = '250px';
-        urlCell.appendChild(urlInput);
-
-        var actions = row.querySelector('.source-actions');
-        actions.innerHTML = '';
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.style.display = 'inline';
-        var csrf = document.createElement('input');
-        csrf.type = 'hidden'; csrf.name = 'csrf_token'; csrf.value = CSRF_TOKEN;
-        var hidId = document.createElement('input');
-        hidId.type = 'hidden'; hidId.name = 'source_id'; hidId.value = id;
-        var hidUrl = document.createElement('input');
-        hidUrl.type = 'hidden'; hidUrl.name = 'source_url'; hidUrl.className = 'edit-url-val';
-        var hidLabel = document.createElement('input');
-        hidLabel.type = 'hidden'; hidLabel.name = 'source_label'; hidLabel.className = 'edit-label-val';
-        var saveBtn = document.createElement('button');
-        saveBtn.type = 'submit'; saveBtn.name = 'edit_source'; saveBtn.value = '1';
-        saveBtn.className = 'btn-sm btn-toggle';
-        saveBtn.textContent = 'Сохранить';
-        saveBtn.onclick = function() { return submitEdit(saveBtn); };
-        var cancelBtn = document.createElement('button');
-        cancelBtn.type = 'button'; cancelBtn.className = 'btn-sm btn-delete';
-        cancelBtn.textContent = 'Отмена';
-        cancelBtn.onclick = cancelEdit;
-        form.appendChild(csrf); form.appendChild(hidId); form.appendChild(hidUrl);
-        form.appendChild(hidLabel); form.appendChild(saveBtn);
-        actions.appendChild(form); actions.appendChild(cancelBtn);
-    }
-
-    function submitEdit(btn) {
-        var row = btn.closest('tr');
-        var urlInput = row.querySelector('.cell-url .edit-input');
-        var labelInput = row.querySelector('.cell-label .edit-input');
-        var hiddenUrl = row.querySelector('.edit-url-val');
-        var hiddenLabel = row.querySelector('.edit-label-val');
-        if (urlInput) hiddenUrl.value = urlInput.value;
-        if (labelInput) hiddenLabel.value = labelInput.value;
-        return true;
-    }
-
-    function cancelEdit() {
-        location.reload();
-    }
-
-    function escHtml(s) {
-        var d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
-    // Вкладки журналов: импорты / проверки (запоминаем выбор)
-    var tabBtns = document.querySelectorAll('#logTabs .tab-btn');
-    function activateTab(name) {
-        tabBtns.forEach(function(b) {
-            var active = b.dataset.tab === name;
-            b.classList.toggle('active', active);
-            var panel = document.getElementById('tab-' + b.dataset.tab);
-            if (panel) panel.hidden = !active;
-        });
-        try { localStorage.setItem('adminLogTab', name); } catch (e) {}
-    }
-    tabBtns.forEach(function(b) {
-        b.addEventListener('click', function() { activateTab(b.dataset.tab); });
-    });
-    (function() {
-        var saved = null;
-        try { saved = localStorage.getItem('adminLogTab'); } catch (e) {}
-        if (saved && document.getElementById('tab-' + saved)) {
-            activateTab(saved);
-        } else if (tabBtns.length) {
-            activateTab(tabBtns[0].dataset.tab);
-        }
-    })();
-    </script>
+    <script src="admin.js?v=2"></script>
 </body>
 </html>

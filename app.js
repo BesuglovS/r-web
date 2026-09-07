@@ -27,9 +27,16 @@ async function apiFetch(action, params = {}) {
     for (const [k, v] of Object.entries(params)) {
         if (v != null && v !== '') url.searchParams.set(k, v);
     }
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+    // Таймаут: зависший запрос не должен висеть вечно
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    try {
+        const r = await fetch(url, { signal: ctrl.signal });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return await r.json();
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 function esc(s) {
@@ -475,3 +482,24 @@ async function initSchedulePage(cfg) {
     loadDates();
     fetchLastCheck();
 }
+
+/* ── Автоинициализация страниц расписания ──
+ * Раньше вызовы initSchedulePage/initHistoryToggle жили в inline <script>
+ * на index.html и teachers.html. Теперь страница определяется по наличию
+ * селектора — это позволило убрать 'unsafe-inline' из CSP script-src.
+ */
+(function autoInitSchedulePage() {
+    let cfg = null;
+    if (document.getElementById('classSelect')) {
+        cfg = { mode: 'class', action: 'classes', selectId: 'classSelect', itemStorageKey: 'selectedClass' };
+    } else if (document.getElementById('teacherSelect')) {
+        cfg = { mode: 'teacher', action: 'teachers', selectId: 'teacherSelect', itemStorageKey: 'selectedTeacher' };
+    }
+    if (!cfg) return;
+    initSchedulePage(cfg);
+    initHistoryToggle('historyToggle', 'historyBox', {
+        mode: cfg.mode,
+        param: cfg.mode === 'class' ? 'class' : 'teacher',
+        storageKey: cfg.itemStorageKey,
+    });
+})();

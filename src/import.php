@@ -12,21 +12,44 @@ function get_yandex_download_url(string $public_url): string
     $api_url = 'https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key='
              . urlencode($public_url);
 
-    $ctx = stream_context_create(['http' => ['timeout' => 30]]);
+    $ctx = stream_context_create(['http' => [
+        'timeout' => 30,
+        'ignore_errors' => true, // читать тело ответа даже при 4xx/5xx (например, 429)
+        'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
+    ]]);
     $response = @file_get_contents($api_url, false, $ctx);
     if ($response === false) {
         throw new RuntimeException('Не удалось получить информацию о файле с Яндекс-Диска');
     }
 
+    $status = 0;
+    foreach ($http_response_header ?? [] as $h) {
+        if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
+            $status = (int)$m[1];
+        }
+    }
+
     $data = json_decode($response, true);
+    if ($status !== 200) {
+        // Яндекс лимитирует частые запросы (429 Too Many Requests) — показываем
+        // код и описание, чтобы отличать rate-limit от реальной ошибки
+        $detail = $data['message'] ?? ($data['description'] ?? 'нет описания');
+        if ($status === 429) {
+            throw new RuntimeException("Яндекс.Диск: HTTP 429 (слишком частые запросы, повторите позже): {$detail}");
+        }
+        throw new RuntimeException("Яндекс.Диск вернул HTTP {$status} при получении ссылки на скачивание: {$detail}");
+    }
+
     if (!$data || empty($data['href'])) {
         throw new RuntimeException('Неверный ответ от Яндекс-Диска: ' . ($response ?: 'пустой ответ'));
     }
 
-    // Защита от SSRF: принимаем только HTTPS-ссылки на загрузчик Яндекса
+    // Защита от SSRF: принимаем только HTTPS-ссылки на загрузчики Яндекса.
+    // ВАЖНО: проверяем СУФФИКС хоста — str_contains пропустил бы
+    // "evil-yandex.attacker.com". Та же проверка повторяется для каждого
+    // редиректа в download_file().
     $href = (string)$data['href'];
-    $host = strtolower((string)(parse_url($href, PHP_URL_HOST) ?: ''));
-    if (!str_starts_with($href, 'https://') || !str_contains($host, 'yandex')) {
+    if (!is_allowed_download_host($href)) {
         throw new RuntimeException('Яндекс-Диск вернул неожиданную ссылку для скачивания');
     }
 
@@ -45,7 +68,8 @@ function get_public_meta(string $public_url): array
 
     $ctx = stream_context_create(['http' => [
         'timeout' => 30,
-        'ignore_errors' => true, // читать тело ответа даже при 4xx/5xx
+        'ignore_errors' => true,
+        'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
     ]]);
     $response = @file_get_contents($api_url, false, $ctx);
 
@@ -79,58 +103,127 @@ function get_public_meta(string $public_url): array
     ];
 }
 
+/**
+ * Проверяет, что хост скачивания — загрузчик Яндекса (SSRF-защита).
+ * Применяется и к исходной ссылке, и к КАЖДОМУ редиректу:
+ * follow_location выключен, редиректы обрабатываются вручную ниже.
+ */
+function is_allowed_download_host(string $url): bool
+{
+    if (!str_starts_with($url, 'https://')) {
+        return false;
+    }
+    $host = strtolower((string)(parse_url($url, PHP_URL_HOST) ?: ''));
+    $allowed_hosts = ['yandex.net', 'yandex.ru', 'yadi.sk'];
+    foreach ($allowed_hosts as $suffix) {
+        if ($host === $suffix || str_ends_with($host, '.' . $suffix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function download_file(string $url, string $dest, int $max_bytes = 52428800): void
 {
-    $ctx = stream_context_create([
-        'http' => [
+    // Ручное следование редиректам: каждый промежуточный URL повторно
+    // проходит SSRF-проверку. follow_location=0 нужен, иначе file_get_contents
+    // молча ушёл бы по редиректу куда угодно (внутренние адреса и т.п.).
+    $max_redirects = 5;
+    $current_url = $url;
+
+    for ($redirect = 0; $redirect <= $max_redirects; $redirect++) {
+        if (!is_allowed_download_host($current_url)) {
+            throw new RuntimeException('Ссылка для скачивания ведёт на недоверенный хост (SSRF-защита)');
+        }
+
+        $ctx = stream_context_create(['http' => [
             'timeout' => 120,
-            'follow_location' => true,
-        ],
-    ]);
-
-    // Потоковое скачивание: не держим весь файл в памяти, ограничиваем размер.
-    // Превышение лимита — явная ошибка (а не молчаливая обрезка файла).
-    $src = @fopen($url, 'rb', false, $ctx);
-    if ($src === false) {
-        throw new RuntimeException('Не удалось скачать файл');
-    }
-
-    $code = 0;
-    foreach ($http_response_header ?? [] as $h) {
-        if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
-            $code = (int)$m[1];
+            'follow_location' => 0,
+            'max_redirects' => 1,
+            'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
+        ]]);
+        $src = @fopen($current_url, 'rb', false, $ctx);
+        if ($src === false) {
+            throw new RuntimeException('Не удалось скачать файл');
         }
-    }
-    if ($code >= 400) {
-        fclose($src);
-        throw new RuntimeException("Не удалось скачать файл: HTTP $code");
-    }
 
-    $dst = @fopen($dest, 'wb');
-    if ($dst === false) {
-        fclose($src);
-        throw new RuntimeException('Не удалось записать файл: ' . $dest);
-    }
-
-    try {
-        $written = 0;
-        while (!feof($src)) {
-            $chunk = fread($src, 65536);
-            if ($chunk === false) {
-                throw new RuntimeException('Ошибка чтения при скачивании файла');
-            }
-            $written += strlen($chunk);
-            if ($written > $max_bytes) {
-                throw new RuntimeException('Файл слишком большой (лимит ' . round($max_bytes / 1048576) . ' МБ)');
-            }
-            if (fwrite($dst, $chunk) === false) {
-                throw new RuntimeException('Ошибка записи при скачивании файла');
+        $code = 0;
+        $location = '';
+        foreach ($http_response_header ?? [] as $h) {
+            if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
+                $code = (int)$m[1];
+            } elseif (preg_match('#^Location:\s*(\S+)#i', $h, $m)) {
+                $location = trim($m[1]);
             }
         }
-    } finally {
-        fclose($src);
-        fclose($dst);
+
+        if ($code >= 300 && $code < 400 && $location !== '') {
+            fclose($src);
+            // Location может быть относительным — разворачиваем относительно текущего URL
+            if (str_starts_with($location, '//')) {
+                // protocol-relative: //host/path → https://host/path
+                $next = 'https:' . $location;
+            } elseif (preg_match('#^https?://#i', $location)) {
+                $next = $location;
+            } else {
+                $p = parse_url($current_url);
+                $next = 'https://' . ($p['host'] ?? '')
+                      . (isset($p['port']) ? ':' . $p['port'] : '')
+                      . '/' . ltrim($location, '/');
+            }
+            $current_url = $next;
+            continue;
+        }
+
+        if ($code >= 400) {
+            fclose($src);
+            throw new RuntimeException("Не удалось скачать файл: HTTP $code");
+        }
+
+        // Успешный ответ — потоковое копирование
+        $dst = @fopen($dest, 'wb');
+        if ($dst === false) {
+            fclose($src);
+            throw new RuntimeException('Не удалось записать файл: ' . $dest);
+        }
+
+        try {
+            $written = 0;
+            while (!feof($src)) {
+                $chunk = fread($src, 65536);
+                if ($chunk === false) {
+                    throw new RuntimeException('Ошибка чтения при скачивании файла');
+                }
+                $written += strlen($chunk);
+                if ($written > $max_bytes) {
+                    throw new RuntimeException('Файл слишком большой (лимит ' . round($max_bytes / 1048576) . ' МБ)');
+                }
+                if (fwrite($dst, $chunk) === false) {
+                    throw new RuntimeException('Ошибка записи при скачивании файла');
+                }
+            }
+        } finally {
+            fclose($src);
+            fclose($dst);
+        }
+        return;
     }
+
+    throw new RuntimeException('Слишком много редиректов при скачивании файла');
+}
+
+/**
+ * Разбивает список дат на батчи для IN (...): SQLite до версии 3.32 имеет
+ * лимит 999 переменных на запрос — большой учебный год на нескольких
+ * источниках может его превысить.
+ */
+function date_batches(array $dates, int $size = 500): array
+{
+    $dates = array_values(array_unique(array_filter($dates)));
+    if (empty($dates)) {
+        return [];
+    }
+    return array_chunk($dates, $size);
 }
 
 /**
@@ -226,13 +319,18 @@ function do_import(string $public_url, ?PDO $existing_pdo = null): array
             $has_changes = false;
 
             if (!empty($date_list)) {
-                // Get current lessons for affected dates
-                $placeholders = implode(',', array_fill(0, count($date_list), '?'));
-                $cur_stmt = $pdo->prepare(
-                    "SELECT * FROM schedule WHERE date IN ($placeholders) ORDER BY date, lesson_num, class_name"
-                );
-                $cur_stmt->execute($date_list);
-                $current = $cur_stmt->fetchAll(PDO::FETCH_ASSOC);
+                // Get current lessons for affected dates (батчами — лимит переменных SQLite)
+                $current = [];
+                foreach (date_batches($date_list) as $batch) {
+                    $placeholders = implode(',', array_fill(0, count($batch), '?'));
+                    $cur_stmt = $pdo->prepare(
+                        "SELECT * FROM schedule WHERE date IN ($placeholders) ORDER BY date, lesson_num, class_name"
+                    );
+                    $cur_stmt->execute($batch);
+                    foreach ($cur_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                        $current[] = $row;
+                    }
+                }
 
                 // Build lookup by key
                 $current_by_key = [];
@@ -354,11 +452,21 @@ function do_import(string $public_url, ?PDO $existing_pdo = null): array
                     }
                 }
 
-                // Delete & re-insert only if something actually changed
+                // Delete & re-insert only if something actually changed —
+                // и только затронутые пары (дата, класс): у неизменённых уроков
+                // imported_at сохраняется, чтобы «Изменено» в интерфейсе отражало
+                // время изменения именно показываемого расписания (класс/дата)
                 $has_changes = !empty($history_rows);
+                $changed_pairs = [];
+                foreach ($history_rows as $hr) {
+                    $changed_pairs[$hr['date'] . "\x1F" . $hr['class_name']] = true;
+                }
                 if ($has_changes) {
-                    $del_stmt = $pdo->prepare("DELETE FROM schedule WHERE date IN ($placeholders)");
-                    $del_stmt->execute($date_list);
+                    $del_pair = $pdo->prepare("DELETE FROM schedule WHERE date = :date AND class_name = :class_name");
+                    foreach (array_keys($changed_pairs) as $pair) {
+                        $pair_parts = explode("\x1F", $pair);
+                        $del_pair->execute([':date' => $pair_parts[0], ':class_name' => $pair_parts[1]]);
+                    }
                 }
             }
 
@@ -374,6 +482,9 @@ function do_import(string $public_url, ?PDO $existing_pdo = null): array
 
             if ($has_changes) {
                 foreach ($new_lessons as $l) {
+                    // Уроки, чья пара (дата, класс) не менялась, не трогаем —
+                    // их imported_at остаётся прежним (показывается честное время)
+                    if (!isset($changed_pairs[$l['date'] . "\x1F" . $l['class_name']])) continue;
                     $ins_stmt->execute([
                         ':sheet_name'     => $l['sheet_name'],
                         ':date'           => $l['date'],
@@ -514,7 +625,8 @@ function edit_source(int $id, string $url, string $label): array
         throw new RuntimeException('URL не может быть пустым');
     }
 
-    $stmt = $pdo->prepare("UPDATE schedule_sources SET url = :url, label = :label WHERE id = :id");
+    // last_dates сбрасываем: даты принадлежали старому файлу-источнику
+    $stmt = $pdo->prepare("UPDATE schedule_sources SET url = :url, label = :label, last_dates = NULL WHERE id = :id");
     $stmt->execute([':url' => $url, ':label' => trim($label), ':id' => $id]);
 
     return ['status' => 'ok', 'updated' => $stmt->rowCount()];
@@ -550,6 +662,21 @@ function update_source_status(int $id, string $status, string $error = '', ?PDO 
     $stmt->execute([gmdate('Y-m-d H:i:s'), $status, $error, $id]); // UTC
 }
 
+/**
+ * Запоминает даты, покрытые последним успешным полным импортом источника (JSON).
+ * Нужно do_check_all(): unchanged-источник подтверждает свои даты без импорта,
+ * и они должны участвовать в cleanup_stale_dates().
+ */
+function update_source_dates(PDO $pdo, int $id, array $dates): void
+{
+    try {
+        $stmt = $pdo->prepare("UPDATE schedule_sources SET last_dates = ? WHERE id = ?");
+        $stmt->execute([json_encode(array_values(array_unique(array_filter($dates)))), $id]);
+    } catch (Exception $e) {
+        // не должно ломать импорт
+    }
+}
+
 function do_import_all(): array
 {
     $pdo = get_db();
@@ -563,16 +690,15 @@ function do_import_all(): array
 
     $results = [];
     $errors = [];
-    $last_id = null;
     $ok_dates = []; // даты, покрытые успешно импортированными источниками
 
     foreach ($active as $source) {
         $id = (int)$source['id'];
         $url = $source['url'];
-        $last_id = $id;
         try {
             $result = do_import($url, $pdo);
             update_source_status($id, $result['status'] ?? 'ok', '', $pdo);
+            update_source_dates($pdo, $id, $result['dates'] ?? []);
             $ok_dates = array_merge($ok_dates, $result['dates'] ?? []);
             $results[] = ['id' => $id, 'url' => $url, 'result' => $result];
         } catch (Exception $e) {
@@ -582,13 +708,8 @@ function do_import_all(): array
         }
     }
 
-    // Ошибка у последнего обработанного (самого свежего) источника
-    $last_error = null;
-    foreach ($errors as $err) {
-        if ((int)$err['id'] === $last_id) {
-            $last_error = $err;
-        }
-    }
+    // Ошибки ВСЕХ источников (не только последнего): иначе при успешном
+    // последнем источнике ошибка первого остаётся без уведомления.
 
     // Автоочистка устаревших недель: только если ВСЕ активные источники
     // импортировались без ошибок (иначе список дат неполный)
@@ -607,7 +728,7 @@ function do_import_all(): array
         'errors'  => count($errors),
         'results' => $results,
         'error_details' => $errors,
-        'last_error' => $last_error,
+        'last_error' => $errors ? $errors[count($errors) - 1] : null,
         'cleanup' => $cleanup,
     ];
 }
@@ -626,10 +747,18 @@ function cleanup_stale_dates(PDO $pdo, array $keep_dates): array
         return ['removed_dates' => [], 'lessons' => 0];
     }
 
-    $placeholders = implode(',', array_fill(0, count($keep), '?'));
-    $stmt = $pdo->prepare("SELECT DISTINCT date FROM schedule WHERE date NOT IN ($placeholders)");
-    $stmt->execute($keep);
-    $stale = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    // Временная таблица вместо NOT IN (...): keep_dates может превышать лимит
+    // переменных SQLite. TEMP-таблица живёт в рамках соединения — безопасно.
+    $pdo->exec("CREATE TEMP TABLE IF NOT EXISTS _keep_dates (date TEXT PRIMARY KEY)");
+    $pdo->exec("DELETE FROM _keep_dates");
+    $ins_keep = $pdo->prepare("INSERT OR IGNORE INTO _keep_dates (date) VALUES (?)");
+    foreach ($keep as $d) {
+        $ins_keep->execute([$d]);
+    }
+
+    $stale = $pdo->query(
+        "SELECT DISTINCT date FROM schedule WHERE date NOT IN (SELECT date FROM _keep_dates)"
+    )->fetchAll(PDO::FETCH_COLUMN);
 
     if (empty($stale)) {
         return ['removed_dates' => [], 'lessons' => 0];
@@ -640,9 +769,16 @@ function cleanup_stale_dates(PDO $pdo, array $keep_dates): array
         $version = get_next_version($pdo);
         $removed_at = gmdate('Y-m-d H:i:s'); // UTC
 
-        $ph = implode(',', array_fill(0, count($stale), '?'));
-        $rows_stmt = $pdo->prepare("SELECT * FROM schedule WHERE date IN ($ph)");
-        $rows_stmt->execute($stale);
+        // Выборка удаляемых уроков батчами (лимит переменных SQLite)
+        $rows = [];
+        foreach (date_batches($stale) as $batch) {
+            $ph = implode(',', array_fill(0, count($batch), '?'));
+            $rows_stmt = $pdo->prepare("SELECT * FROM schedule WHERE date IN ($ph)");
+            $rows_stmt->execute($batch);
+            foreach ($rows_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $rows[] = $row;
+            }
+        }
 
         $hist = $pdo->prepare("
             INSERT INTO schedule_history
@@ -654,7 +790,7 @@ function cleanup_stale_dates(PDO $pdo, array $keep_dates): array
         ");
 
         $lessons = 0;
-        foreach ($rows_stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        foreach ($rows as $row) {
             $hist->execute([
                 ':version'       => $version,
                 ':date'          => $row['date'],
@@ -672,8 +808,11 @@ function cleanup_stale_dates(PDO $pdo, array $keep_dates): array
             $lessons++;
         }
 
-        $del = $pdo->prepare("DELETE FROM schedule WHERE date IN ($ph)");
-        $del->execute($stale);
+        foreach (date_batches($stale) as $batch) {
+            $ph = implode(',', array_fill(0, count($batch), '?'));
+            $del = $pdo->prepare("DELETE FROM schedule WHERE date IN ($ph)");
+            $del->execute($batch);
+        }
 
         $pdo->exec('COMMIT');
         return ['removed_dates' => $stale, 'lessons' => $lessons, 'version' => $version];
@@ -759,14 +898,12 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
 
     $results = [];
     $errors = [];
-    $last_id = null;
-    $full_imports = 0;   // сколько источников прошли полный импорт в этом цикле
+    $covered = 0;        // источники, чьи даты подтверждены (импорт ИЛИ unchanged)
     $ok_dates = [];      // даты, покрытые успешно импортированными источниками
 
     foreach ($active as $source) {
         $id = (int)$source['id'];
         $url = $source['url'];
-        $last_id = $id;
 
         // Страховочный полный импорт: прошло больше N часов с последнего
         $last_imported = (string)($source['last_imported_at'] ?? '');
@@ -796,16 +933,27 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
 
                 $result = do_import($url, $pdo);
                 update_source_status($id, $result['status'] ?? 'ok', '', $pdo);
+                update_source_dates($pdo, $id, $result['dates'] ?? []);
                 update_source_check($pdo, $id, $meta);
                 log_check($pdo, $id, $url, 'changed', $old_md5, $meta['md5'], $reason . ' -> ' . ($result['status'] ?? 'ok'));
 
-                $full_imports++;
+                $covered++;
                 $ok_dates = array_merge($ok_dates, $result['dates'] ?? []);
 
                 $results[] = ['id' => $id, 'url' => $url, 'check' => 'changed', 'reason' => $reason, 'result' => $result];
             } else {
                 update_source_check($pdo, $id, $meta);
                 log_check($pdo, $id, $url, 'unchanged', $old_md5, $meta['md5']);
+
+                // Источник не изменился → последним импортом покрыты даты,
+                // сохранённые в last_dates. Учитываем их в автоочистке, иначе
+                // cleanup почти никогда не запускался бы (нужно, чтобы ВСЕ
+                // источники прошли полный импорт в одном цикле).
+                $source_dates = json_decode((string)($source['last_dates'] ?? '[]'), true);
+                if (is_array($source_dates)) {
+                    $ok_dates = array_merge($ok_dates, $source_dates);
+                }
+                $covered++;
 
                 $results[] = ['id' => $id, 'url' => $url, 'check' => 'unchanged'];
             }
@@ -818,18 +966,14 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
         }
     }
 
-    // Ошибка у последнего обработанного (самого свежего) источника
-    $last_error = null;
-    foreach ($errors as $err) {
-        if ((int)$err['id'] === $last_id) {
-            $last_error = $err;
-        }
-    }
+    // Ошибки ВСЕХ источников (не только последнего): иначе при успешном
+    // последнем источнике ошибка первого остаётся без уведомления.
 
-    // Автоочистка устаревших недель: только когда ВСЕ активные источники
-    // прошли полный импорт (иначе список дат неполный — рискуем снести чужие даты)
+    // Автоочистка устаревших дат: только когда даты ВСЕХ активных источников
+    // подтверждены (полный импорт ИЛИ unchanged с известными last_dates) —
+    // иначе список дат неполный и мы рискуем снести чужие даты.
     $cleanup = ['removed_dates' => [], 'lessons' => 0];
-    if (!empty($active) && $full_imports === count($active)) {
+    if (!empty($active) && $covered === count($active)) {
         try {
             $cleanup = cleanup_stale_dates($pdo, $ok_dates);
         } catch (Exception $e) {
@@ -851,7 +995,7 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
         'errors'  => count($errors),
         'results' => $results,
         'error_details' => $errors,
-        'last_error' => $last_error,
+        'last_error' => $errors ? $errors[count($errors) - 1] : null,
         'cleanup' => $cleanup,
     ];
 }

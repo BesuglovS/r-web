@@ -63,7 +63,9 @@ function read_shared_strings(ZipArchive $zip): array
     if ($data === false) return [];
 
     $doc = new DOMDocument();
-    if (!$doc->loadXML($data)) return [];
+    // LIBXML_NONET — запрет сетевых загрузок сущностей (XXE-оборона:
+    // XLSX приходит из внешнего источника)
+    if (!$doc->loadXML($data, LIBXML_NONET | LIBXML_COMPACT)) return [];
 
     $xpath = new DOMXPath($doc);
     $xpath->registerNamespace('s', ML_NS);
@@ -86,14 +88,14 @@ function read_sheet_map(ZipArchive $zip): array
 
     $rid_map = [];
     $doc = new DOMDocument();
-    if ($doc->loadXML($rels_data)) {
+    if ($doc->loadXML($rels_data, LIBXML_NONET | LIBXML_COMPACT)) {
         foreach ($doc->getElementsByTagName('Relationship') as $rel) {
             $rid_map[$rel->getAttribute('Id')] = $rel->getAttribute('Target');
         }
     }
 
     $doc2 = new DOMDocument();
-    if (!$doc2->loadXML($wb)) return [];
+    if (!$doc2->loadXML($wb, LIBXML_NONET | LIBXML_COMPACT)) return [];
 
     $xpath = new DOMXPath($doc2);
     $xpath->registerNamespace('s', ML_NS);
@@ -124,7 +126,7 @@ function col_to_index(string $col): int
 function parse_sheet(string $xml_data, array $strings, string $sheet_name): array
 {
     $doc = new DOMDocument();
-    if (!$doc->loadXML($xml_data)) return [];
+    if (!$doc->loadXML($xml_data, LIBXML_NONET | LIBXML_COMPACT)) return [];
 
     $xpath = new DOMXPath($doc);
     $xpath->registerNamespace('s', ML_NS);
@@ -225,7 +227,9 @@ function parse_sheet(string $xml_data, array $strings, string $sheet_name): arra
  */
 function extract_blocks(array $rows): array
 {
-    $time_pattern = '/^\d{2}:\d{2}-\d{2}:\d{2}$/';
+    // Единый паттерн времени «ЧЧ:ММ-ЧЧ:ММ» — допускаем пробелы вокруг дефиса
+    // и однозначные часы («9:00-10:45»), чтобы не терять уроки из-за формата.
+    $time_pattern = '/^\s*\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}\s*$/';
     $day_pattern = '/^(ПОНЕДЕЛЬНИК|ВТОРНИК|СРЕДА|ЧЕТВЕРГ|ПЯТНИЦА|СУББОТА|ВОСКРЕСЕНЬЕ)$/u';
     $class_pattern = '/^\d{1,2}[А-Я]$/u';
 
@@ -391,6 +395,15 @@ function parse_lesson_cell(string $cell): ?array
     $room = '';
     $group = null;
 
+    // Последний сегмент может быть чистой группой: «Физика/Сидоров (205)/(1.2)».
+    // Тогда предыдущий сегмент — учитель (и кабинет).
+    if (preg_match('/^\(([А-Яа-яёЁ0-9]+\.[А-Яа-яёЁ0-9]+)\)$/', $teacher_part, $gm)) {
+        $group = $gm[1];
+        $teacher_part = array_pop($parts) ?? '';
+        $subject_part = implode('/', $parts);
+        $teacher = $teacher_part;
+    }
+
     if (preg_match('/^(.+?)\s*\(([^)]+)\)\s*$/', $teacher_part, $m)) {
         $teacher = trim($m[1]);
         $room = trim($m[2]);
@@ -424,26 +437,52 @@ function parse_sheet_date(string $sheet_name): array
         $day = (int)$dm[1];
         $month = (int)$dm[2];
 
+        // Расчёты «сегодня/года» — в самарском времени (UTC+4), а не в TZ
+        // сервера: на проде TZ обычно UTC, и в новогоднюю ночь (00:00–04:00
+        // по Самаре) эвристика учебного года могла выбрать неверный год.
+        $now = new DateTime('now', new DateTimeZone('Europe/Samara'));
+        $sixMonthsAgo = (new DateTime('now', new DateTimeZone('Europe/Samara')))->modify('-6 months');
+        $oneYearAhead = (new DateTime('now', new DateTimeZone('Europe/Samara')))->modify('+1 year');
+
         // Валидация: месяц 1-12, день допустим для месяца — иначе мусорная
-        // дата вроде «2026-45-67» попала бы в БД и сломала выборку
-        if ($month < 1 || $month > 12 || !checkdate($month, $day, (int)date('Y'))) {
+        // дата вроде «2026-45-67» попала бы в БД и сломала выборку.
+        // Год-кандидат вычисляем ДО проверки: «29.02» валиден только в
+        // високосный год-кандидат (проверка по текущему году отвергла бы
+        // корректный лист на 29 февраля следующего года).
+        if ($month < 1 || $month > 12 || $day < 1 || $day > 31) {
             return ['date' => '', 'day_of_week' => $day_of_week];
         }
 
-        $year = (int)date('Y');
+        $year = (int)$now->format('Y');
+        if (!checkdate($month, $day, $year)) {
+            // 29.02 в невисокосный текущий год — пробуем следующий
+            if (!checkdate($month, $day, $year + 1)) {
+                return ['date' => '', 'day_of_week' => $day_of_week];
+            }
+            $year++;
+        }
         // Учебный год: если дата листа уже в далёком прошлом (более 6 месяцев назад),
         // она относится к следующему учебному году (например, «ПН 15.01»,
         // импортированный в декабре, — это январь будущего года; «ПН 01.09»
         // в мае — сентябрь будущего года).
         $candidate = sprintf('%04d-%02d-%02d', $year, $month, $day);
-        if ($candidate < date('Y-m-d', strtotime('-6 months'))) {
+        if ($candidate < $sixMonthsAgo->format('Y-m-d')) {
             $year++;
+            // После инкремента года дата обязана остаться валидной
+            // (29.02 → невисокосный год невозможен здесь: кандидаты отличаются
+            // не более чем на год, один из них високосный — проверено выше,
+            // но перестраховываемся)
+            if (!checkdate($month, $day, $year)) {
+                return ['date' => '', 'day_of_week' => $day_of_week];
+            }
+            // Пересчитываем ПОСЛЕ инкремента года
+            $candidate = sprintf('%04d-%02d-%02d', $year, $month, $day);
         }
         // Защита от опечаток: дата дальше чем на год вперёд — явно ошибочная
-        if ($candidate > date('Y-m-d', strtotime('+1 year'))) {
+        if ($candidate > $oneYearAhead->format('Y-m-d')) {
             return ['date' => '', 'day_of_week' => $day_of_week];
         }
-        $date = sprintf('%04d-%02d-%02d', $year, $month, $day);
+        $date = $candidate;
     } else {
         $date = '';
     }
