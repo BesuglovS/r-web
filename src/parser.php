@@ -250,7 +250,7 @@ function extract_blocks(array $rows): array
         foreach ($rows as $cells) {
             $v = $cells[$off] ?? '';
             if ($v !== '' && preg_match($time_pattern, $v)) {
-                $bands[] = ['offset' => (int)$off, 'class' => null, 'lessons' => []];
+                $bands[] = ['offset' => (int)$off, 'class' => null, 'lessons' => [], 'skip' => false];
                 break;
             }
         }
@@ -262,9 +262,11 @@ function extract_blocks(array $rows): array
 
     $completed_blocks = [];
 
+    // Заголовки — по-поясные: строка-заголовок одной полосы не должна
+    // обрывать обработку данных остальных полос этой же строки (иначе сдвинутая
+    // на пару строк полоса «съедает» уроки соседних классов).
     foreach ($rows as $rn => $cells) {
-        // Check if this is a header row (any band has day_name + class_name)
-        $is_header = false;
+        $is_header_any = false;
         $band_classes = [];
         foreach ($bands as $bi => $band) {
             $go = $band['offset'];
@@ -273,25 +275,10 @@ function extract_blocks(array $rows): array
             if ($cell0 && preg_match($day_pattern, $cell0)
                 && $cell2 && preg_match($class_pattern, $cell2)) {
                 $band_classes[$bi] = $cell2;
-                $is_header = true;
+                $is_header_any = true;
             } else {
                 $band_classes[$bi] = null;
             }
-        }
-
-        if ($is_header) {
-            // Save any active bands that have lessons
-            foreach ($bands as $bi => $band) {
-                if ($band['class'] && !empty($band['lessons'])) {
-                    $completed_blocks[] = [
-                        'class'   => $band['class'],
-                        'lessons' => $band['lessons'],
-                    ];
-                }
-                $bands[$bi]['class'] = $band_classes[$bi];
-                $bands[$bi]['lessons'] = [];
-            }
-            continue;
         }
 
         // Check if this is an empty row (no time in any band)
@@ -305,8 +292,8 @@ function extract_blocks(array $rows): array
             }
         }
 
-        if (!$has_time) {
-            // Separator: save all active bands
+        if (!$is_header_any && !$has_time) {
+            // Separator: save all active bands (класс сохраняем — блок продолжается)
             foreach ($bands as $bi => $band) {
                 if ($band['class'] && !empty($band['lessons'])) {
                     $completed_blocks[] = [
@@ -319,11 +306,37 @@ function extract_blocks(array $rows): array
             continue;
         }
 
-        // Data row: extract lessons from each band
+        // По-поясная обработка строки
         foreach ($bands as $bi => $band) {
-            if (!$band['class']) continue;
-
             $go = $band['offset'];
+
+            // Заголовок принадлежит только этой полосе: финализируем её буфер
+            // и меняем её класс. Остальные полосы обрабатываются ниже как данные.
+            if ($band_classes[$bi] !== null) {
+                if ($band['class'] && !empty($band['lessons'])) {
+                    $completed_blocks[] = [
+                        'class'   => $band['class'],
+                        'lessons' => $band['lessons'],
+                    ];
+                }
+                // Полоса вне основного блока с дублирующим классом (например,
+                // «5Ж» справа от сетки 5-х классов) — не импортируем:
+                // класс уже занят другой активной полосой.
+                $dup = false;
+                foreach ($bands as $oj => $other) {
+                    if ($oj !== $bi && !$other['skip'] && $other['class'] === $band_classes[$bi]) {
+                        $dup = true;
+                        break;
+                    }
+                }
+                $bands[$bi]['class'] = $dup ? null : $band_classes[$bi];
+                $bands[$bi]['skip'] = $dup;
+                $bands[$bi]['lessons'] = [];
+                continue;
+            }
+
+            if (empty($band['class']) || !empty($band['skip'])) continue;
+
             $time_cell = $cells[$go] ?? '';
             if (!$time_cell || !preg_match($time_pattern, $time_cell)) continue;
 
