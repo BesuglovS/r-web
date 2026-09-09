@@ -5,6 +5,9 @@
 require_once __DIR__ . '/src/auth.php';
 require_admin();
 
+// Динамическая страница с сессией — без кэша
+header('Cache-Control: no-store');
+
 $message = '';
 $message_type = '';
 

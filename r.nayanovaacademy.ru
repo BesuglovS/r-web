@@ -88,6 +88,19 @@ server {
         access_log off;
     }
 
+    # HTML — всегда реавлидация (no-cache = хранить, но проверять по ETag).
+    # Иначе браузеры держат старый HTML в эвристическом кэше и не видят
+    # новые ?v= у статики. Заголовки сервера в location не наследуются —
+    # дублируем security-заголовки здесь
+    location ~* \.html$ {
+        add_header Cache-Control "no-cache" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'" always;
+    }
+
     # admin.php: импорт может идти дольше 60 секунд (несколько источников,
     # медленный Яндекс) — увеличенный таймаут FPM
     location = /admin.php {

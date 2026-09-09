@@ -3,6 +3,7 @@
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 
 :root{
+  color-scheme:dark;
   --bg:#0c1222;
   --surface:#161f33;
   --surface2:#1c2640;
@@ -18,6 +19,7 @@
 }
 
 [data-theme="light"]{
+  color-scheme:light;
   --bg:#f1f5f9;
   --surface:#ffffff;
   --surface2:#f8fafc;
@@ -109,6 +111,16 @@ html:not([data-theme]) .theme-btn .icon-sun{display:inline}
   font-size:.9rem;
 }
 .select-wrap select:focus{outline:none;border-color:var(--accent)}
+
+/* Date/time inputs (страница «Аудитории») — стилистика как у select */
+.input-wrap input{
+  width:100%;appearance:none;
+  padding:.65rem .85rem;
+  border:1px solid var(--border);border-radius:var(--radius);
+  background:var(--bg);color:var(--text);
+  font-size:.9rem;font-family:inherit;
+}
+.input-wrap input:focus{outline:none;border-color:var(--accent)}
 
 /* Week selector — dropdown (на телефоне — на всю ширину) */
 .week-select-wrap select{
@@ -287,13 +299,21 @@ html:not([data-theme]) .theme-btn .icon-sun{display:inline}
   grid-column:3;grid-row:1/3;
   align-self:center;
   display:flex;align-items:center;justify-content:center;
-  min-width:2.6rem;height:2.6rem;
+  min-width:2.6rem;min-height:2.6rem;
+  max-width:7rem;
+  padding:.25rem .5rem;
   border-radius:.5rem;
   background:rgba(59,130,246,.1);
   border:1px solid rgba(59,130,246,.25);
   font-size:.9rem;font-weight:700;
+  line-height:1.15;
   color:var(--accent);
-  white-space:nowrap;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  text-align:center;
+}
+.lesson-room.room-long{
+  font-size:.72rem;font-weight:600;
 }
 
 .lesson-time{
@@ -311,6 +331,8 @@ html:not([data-theme]) .theme-btn .icon-sun{display:inline}
   .header h1{font-size:1.15rem}
   .controls{padding:.85rem 1.5rem;flex-direction:row;align-items:center;gap:1rem}
   .select-wrap{min-width:200px;flex:0 0 auto}
+  .time-select-wrap{min-width:8.5rem}
+  .input-wrap{min-width:9.5rem;flex:0 0 auto}
   .week-select-wrap select{width:auto;min-width:11rem}
   .content{padding:1rem 1.5rem}
 
@@ -320,7 +342,8 @@ html:not([data-theme]) .theme-btn .icon-sun{display:inline}
   }
   .lesson-num{width:2.25rem;height:2.25rem;font-size:.8rem}
   .lesson-subject{font-size:.95rem}
-  .lesson-room{min-width:3rem;height:3rem;font-size:1rem}
+  .lesson-room{min-width:3rem;min-height:3rem;max-width:8rem;font-size:1rem}
+  .lesson-room.room-long{font-size:.8rem}
 }
 
 /* ── Desktop: table layout ── */
@@ -366,6 +389,120 @@ html:not([data-theme]) .theme-btn .icon-sun{display:inline}
   .schedule-table .col-extra{color:var(--text2)}
   .schedule-table .col-room{color:var(--text3);width:80px}
   .schedule-table .group{color:var(--accent);font-size:.78rem}
+}
+
+/* ── Свободные аудитории: сетка плиток ── */
+.free-summary{
+  font-size:.85rem;
+  color:var(--text2);
+  margin-bottom:.65rem;
+}
+.free-summary b{color:var(--ok)}
+
+.free-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(5.5rem,1fr));
+  gap:.5rem;
+}
+
+.room-tile{
+  display:flex;align-items:center;justify-content:center;
+  min-height:3.4rem;
+  padding:.4rem .3rem;
+  border-radius:.6rem;
+  border:1px solid var(--border);
+  background:var(--surface);
+  font-size:.85rem;font-weight:600;
+  line-height:1.15;text-align:center;
+  overflow-wrap:anywhere;
+  cursor:default;
+}
+.room-tile.room-long{font-size:.7rem;font-weight:500}
+
+.room-free{
+  color:var(--ok);
+  border-color:rgba(34,197,94,.45);
+  background:rgba(34,197,94,.08);
+}
+.room-busy{
+  color:var(--text3);
+  background:var(--surface2);
+  opacity:.85;
+  flex-direction:column;
+  justify-content:center;
+  gap:.15rem;
+  cursor:pointer;
+}
+.room-busy:hover{border-color:var(--accent)}
+.room-tile[data-idx]{cursor:pointer}
+
+.rt-name{
+  font-weight:700;
+  font-size:.85rem;
+  color:var(--text2);
+}
+.rt-subject{
+  font-size:.66rem;font-weight:500;
+  color:var(--text2);
+  line-height:1.2;
+}
+.rt-teacher{
+  font-size:.66rem;
+  color:var(--text3);
+}
+.rt-class{
+  font-size:.66rem;font-weight:600;
+  color:var(--accent);
+}
+
+/* ── Модальное окно с деталями урока ── */
+.modal-overlay{
+  position:fixed;inset:0;z-index:20;
+  background:rgba(4,8,18,.55);
+  display:flex;align-items:center;justify-content:center;
+  padding:1rem;
+}
+.modal-overlay[hidden]{display:none}
+
+.modal{
+  position:relative;
+  width:100%;max-width:20rem;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:1rem 1.1rem;
+  box-shadow:0 8px 30px rgba(0,0,0,.35);
+}
+.modal-close{
+  position:absolute;top:.4rem;right:.4rem;
+  width:1.8rem;height:1.8rem;
+  border:1px solid var(--border);border-radius:.5rem;
+  background:var(--surface2);color:var(--text2);
+  font-size:1rem;line-height:1;
+  cursor:pointer;transition:all .15s;
+}
+.modal-close:hover{color:var(--text);border-color:var(--text3)}
+
+.modal-title{
+  font-weight:700;font-size:1rem;
+  margin-bottom:.15rem;
+}
+.modal-sub{
+  font-size:.75rem;color:var(--text2);
+  margin-bottom:.6rem;
+}
+.modal-list{display:grid}
+.m-row{
+  display:flex;justify-content:space-between;gap:.6rem;
+  padding:.3rem 0;
+  border-bottom:1px dashed var(--border);
+  font-size:.85rem;
+}
+.m-row:last-child{border-bottom:none}
+.m-k{color:var(--text3);white-space:nowrap}
+.m-v{
+  color:var(--text);font-weight:500;
+  text-align:right;overflow-wrap:anywhere;
 }
 
 /* ── Last import indicator ── */

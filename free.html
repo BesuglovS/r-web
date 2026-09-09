@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Свободные аудитории</title>
+    <link rel="icon" href="favicon.ico?v=2" type="image/x-icon">
+    <link rel="icon" href="favicon.svg?v=2" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png?v=2">
+    <link rel="stylesheet" href="style.css?v=21">
+</head>
+<body>
+    <div class="header">
+        <h1>Расписание</h1>
+        <div class="header-right">
+            <button class="theme-btn" id="themeToggle" aria-label="Сменить тему">
+                <span class="icon-sun">&#9788;</span>
+                <span class="icon-moon">&#9790;</span>
+            </button>
+            <nav class="nav">
+                <a href="index.html">Ученики</a>
+                <a href="teachers.html">Учителя</a>
+                <a href="free.html" class="active">Аудитории</a>
+            </nav>
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="select-wrap">
+            <select id="buildingSelect" aria-label="Корпус">
+                <option value="1">1 корпус — Чапаевская</option>
+                <option value="2">2 корпус — Молодогвардейская</option>
+                <option value="3">3 корпус — Ярмарочная</option>
+            </select>
+        </div>
+        <div class="input-wrap">
+            <input type="date" id="dateInput" aria-label="Дата">
+        </div>
+        <div class="select-wrap time-select-wrap">
+            <select id="timeSelect" aria-label="Время начала урока">
+                <option value="">--:--</option>
+            </select>
+        </div>
+        <div class="day-tabs" id="modeTabs">
+            <button class="day-tab active" data-mode="free">Только свободные</button>
+            <button class="day-tab" data-mode="all">Все аудитории</button>
+        </div>
+    </div>
+
+    <div class="content" id="freeContent">
+        <div class="empty-state">Загрузка...</div>
+    </div>
+
+    <div class="last-import" id="lastImport"></div>
+
+    <script src="app.js?v=25"></script>
+    <script src="free.js?v=3"></script>
+</body>
+</html>

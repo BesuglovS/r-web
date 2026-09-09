@@ -8,6 +8,11 @@
  * GET ?action=dates&week=YYYY-MM-DD — даты за неделю
  * GET ?action=schedule&class=X&date=Y — расписание класса на дату
  * GET ?action=schedule&teacher=X&date=Y — расписание учителя на дату
+ * GET ?action=free_rooms&building=1..3&date=Y&time=H:MM — аудитории корпуса
+ *   с отметкой «свободно/занято» на дату и момент времени + periods —
+ *   интервалы уроков дня и lesson_starts — времена начала уроков 1–10
+ *   (клиент строит из них выпадающий список и сдвигает авто-время
+ *   с перемены на следующий урок)
  * GET ?action=history              — история изменений
  * GET ?action=import_log           — журнал импортов (требует авторизации)
  * GET ?action=check_log            — журнал проверок источников (требует авторизации)
@@ -100,6 +105,7 @@ try {
             'weeks'       => 300,
             'dates'       => 300,
             'schedule'    => 60,
+            'free_rooms'  => 30,
             'history'     => 60,
             'last_import' => 30,
         ];
@@ -241,6 +247,118 @@ try {
                 'schedule'    => $rows,
                 // Время хранится в UTC — отдаём в самарском
                 'imported_at' => $view_imported !== null ? utc_to_samara($view_imported) : null,
+            ]);
+            break;
+
+        case 'free_rooms':
+            // Свободные аудитории корпуса на дату и момент времени.
+            $fb = $_GET['building'] ?? null;
+            $fdate = $_GET['date'] ?? null;
+            $ftime = $_GET['time'] ?? null;
+            // is_string(): ?building[]=x уронил бы PDO, как уже защищено в 'schedule'
+            if (!is_string($fb)) $fb = '';
+            if (!is_string($fdate)) $fdate = '';
+            if (!is_string($ftime)) $ftime = '';
+
+            if (!preg_match('/^[123]$/', $fb)) {
+                http_response_code(400);
+                echo json_encode(['error' => 'Укажите building: 1, 2 или 3']);
+                break;
+            }
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fdate)
+                || !checkdate((int)substr($fdate, 5, 2), (int)substr($fdate, 8, 2), (int)substr($fdate, 0, 4))) {
+                http_response_code(400);
+                echo json_encode(['error' => 'Неверный формат даты (ожидается YYYY-MM-DD)']);
+                break;
+            }
+            if (!preg_match('/^(\d{1,2}):(\d{2})$/', $ftime, $ftm)
+                || (int)$ftm[1] > 23 || (int)$ftm[2] > 59) {
+                http_response_code(400);
+                echo json_encode(['error' => 'Неверный формат времени (ожидается HH:MM)']);
+                break;
+            }
+            // Нормализация в HH:MM (в БД время хранится с нулевым паддингом)
+            $ftime = sprintf('%02d:%02d', (int)$ftm[1], (int)$ftm[2]);
+
+            // Активные аудитории корпуса
+            $rstmt = $pdo->prepare("SELECT name FROM rooms WHERE building = ? AND is_active = 1");
+            $rstmt->execute([(int)$fb]);
+            $room_names = $rstmt->fetchAll(PDO::FETCH_COLUMN);
+
+            // Занятость на момент времени. Сравнение строк «HH:MM» (в БД время
+            // с нулевым паддингом); substr('0'||time_start,-5) подстраховка от
+            // незападенных '9:00' в будущих импортах.
+            $occupied = [];
+            if ($room_names) {
+                $fph = implode(',', array_fill(0, count($room_names), '?'));
+                $fstmt = $pdo->prepare(
+                    "SELECT room, lesson_num, time_start, time_end, subject, teacher, class_name, parallel_group
+                     FROM schedule
+                     WHERE date = ? AND room IN ($fph)
+                       AND substr('0'||time_start,-5) <= ?
+                       AND substr('0'||time_end,-5) > ?"
+                );
+                $fstmt->execute(array_merge([$fdate], $room_names, [$ftime, $ftime]));
+                foreach ($fstmt->fetchAll(PDO::FETCH_ASSOC) as $frow) {
+                    // Параллельные группы могут делить аудиторию — достаточно одного слота
+                    if (!isset($occupied[$frow['room']])) {
+                        $occupied[$frow['room']] = $frow;
+                    }
+                }
+            }
+
+            // Интервалы уроков дня — клиент сдвигает авто-время с перемены
+            // на начало следующего урока
+            $pstmt = $pdo->prepare(
+                "SELECT DISTINCT time_start, time_end FROM schedule
+                 WHERE date = ? ORDER BY time_start, time_end"
+            );
+            $pstmt->execute([$fdate]);
+            $periods = $pstmt->fetchAll(PDO::FETCH_ASSOC);
+
+            // Времена начала уроков дня (по номерам уроков) — клиент строит
+            // из них выпадающий список выбора времени
+            $lstmt = $pdo->prepare(
+                "SELECT lesson_num, MIN(time_start) AS time_start
+                 FROM schedule WHERE date = ?
+                 GROUP BY lesson_num ORDER BY lesson_num LIMIT 10"
+            );
+            $lstmt->execute([$fdate]);
+            $lesson_starts = $lstmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $frooms = [];
+            foreach ($room_names as $fname) {
+                if (isset($occupied[$fname])) {
+                    $focc = $occupied[$fname];
+                    $frooms[] = [
+                        'name'           => $fname,
+                        'free'           => false,
+                        'lesson_num'     => (int)$focc['lesson_num'],
+                        'time_start'     => $focc['time_start'],
+                        'time_end'       => $focc['time_end'],
+                        'subject'        => $focc['subject'],
+                        'teacher'        => $focc['teacher'],
+                        'class_name'     => $focc['class_name'],
+                        'parallel_group' => $focc['parallel_group'],
+                    ];
+                } else {
+                    $frooms[] = ['name' => $fname, 'free' => true, 'lesson_num' => null,
+                                 'time_start' => null, 'time_end' => null, 'subject' => null,
+                                 'teacher' => null, 'class_name' => null, 'parallel_group' => null];
+                }
+            }
+            // Естественная сортировка: Ч-2 раньше Ч-10, корпуса по этажам
+            usort($frooms, function ($a, $b) { return strnatcmp($a['name'], $b['name']); });
+            $free_count = count(array_filter($frooms, function ($r) { return $r['free']; }));
+
+            echo json_encode([
+                'building'      => (int)$fb,
+                'date'          => $fdate,
+                'time'          => $ftime,
+                'periods'       => $periods,
+                'lesson_starts' => $lesson_starts,
+                'free_count'    => $free_count,
+                'rooms'         => $frooms,
             ]);
             break;
 

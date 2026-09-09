@@ -121,9 +121,10 @@ function init_db(PDO $pdo): void
 
     // user_version: 1 = миграция UTC выполнена, 2 = промежуточная (историческая),
     // 3 = актуальная схема (+check_log, md5-колонки в schedule_sources),
-    // 4 = + колонка last_dates в schedule_sources (даты, покрытые источником).
+    // 4 = + колонка last_dates в schedule_sources (даты, покрытые источником),
+    // 5 = + таблица аудиторий rooms (привязка к корпусам, сид начального списка).
     $ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-    if ($ver >= 4) {
+    if ($ver >= 5) {
         $inited[$key] = true;
         return;
     }
@@ -218,12 +219,14 @@ function init_db(PDO $pdo): void
     ");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_check_log_checked_at ON check_log(checked_at)");
 
+    migrate_rooms($pdo);
+
     migrate_link_txt($pdo);
     migrate_timestamps_to_utc($pdo);
 
     // Поднять версию схемы (после UTC-миграции, чтобы она успела отработать на старых БД)
-    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 4) {
-        $pdo->exec('PRAGMA user_version = 4');
+    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 5) {
+        $pdo->exec('PRAGMA user_version = 5');
     }
 
     $inited[$key] = true;
@@ -251,6 +254,53 @@ function migrate_source_columns(PDO $pdo): void
     foreach ($additions as $sql) {
         if (preg_match('/ADD COLUMN (\w+)/', $sql, $m) && !isset($existing[$m[1]])) {
             $pdo->exec($sql);
+        }
+    }
+}
+
+/**
+ * Таблица аудиторий с привязкой к корпусам (миграция v5).
+ * Корпуса: 1 = Чапаевская, 2 = Молодогвардейская, 3 = Ярмарочная.
+ * Сид начального списка — INSERT OR IGNORE, идемпотентно.
+ */
+function migrate_rooms(PDO $pdo): void
+{
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS rooms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            building INTEGER NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+    ");
+
+    // Начальный список аудиторий снят с расписания (GROUP BY room) и
+    // размечен по корпусам; аудитории без корпуса в таблицу не вносились.
+    $rooms = [
+        1 => [
+            'Ч-2', 'Ч-3', 'Ч-3А', 'Ч-4', 'Ч-5', 'Ч-6', 'Ч-7', 'Ч-8', 'Ч-9',
+            'Ч-10', 'Ч-11', 'Ч-14', 'Ч-15', 'Ч-16', 'Ч-17', 'Ч-18', 'Ч-19',
+            'Ч-20', 'Ч-21',
+            'Спортивный зал', 'Спортивный зал на Чапаевской',
+            'Театральный зал на Чапаевской',
+        ],
+        2 => [
+            '102', '110', '111', '114', '117', '124',
+            '203', '204', '205', '206', '207', '208', '209', '211', '214',
+            '219', '220',
+            '301', '302', '303', '304', '305', '306', '307', '308', '311',
+            'Лаборатория', 'Театральный зал', 'Конный клуб',
+        ],
+        3 => [
+            'Я-1', 'Я-2', 'Я-3', 'Я-4', 'Я-5', 'Я-6', 'Я-16', 'Я-18', 'Я-21',
+            'Спортивный зал на Ярмарочной',
+        ],
+    ];
+
+    $stmt = $pdo->prepare("INSERT OR IGNORE INTO rooms (name, building) VALUES (?, ?)");
+    foreach ($rooms as $building => $names) {
+        foreach ($names as $name) {
+            $stmt->execute([$name, $building]);
         }
     }
 }

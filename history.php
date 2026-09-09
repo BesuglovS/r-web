@@ -11,6 +11,9 @@ require_once __DIR__ . '/src/auth.php';
 require_admin();
 require_once __DIR__ . '/src/db.php';
 
+// Динамическая страница — без кэша
+header('Cache-Control: no-store');
+
 $at = (string)($_GET['at'] ?? '');
 if (!preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $at)) {
     header('Location: admin.php');
