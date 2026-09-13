@@ -14,6 +14,10 @@
  *   (клиент строит из них выпадающий список и сдвигает авто-время
  *   с перемены на следующий урок)
  * GET ?action=history              — история изменений
+ * GET ?action=history&since_version=N — версии истории с номером > N
+ *   (для клиентских фоновых проверок; тот же формат {"history": [...]},
+ *   до 50 версий). Необязательный &before_version=M ограничивает выборку
+ *   версиями < M — пагинация вглубь истории (клиент идёт от новых к старым)
  * GET ?action=import_log           — журнал импортов (требует авторизации)
  * GET ?action=check_log            — журнал проверок источников (требует авторизации)
  * GET ?action=sources              — список источников расписаний
@@ -386,6 +390,78 @@ try {
             break;
 
         case 'history':
+            // Фоновые проверки клиентов: версии с номером > since_version.
+            // Тот же формат ответа, что и у полного списка ({"history": [...]}).
+            // is_string(): ?since_version[]=x превратил бы значение в массив.
+            if (isset($_GET['since_version']) && is_string($_GET['since_version'])
+                && !isset($_GET['class']) && !isset($_GET['teacher']) && !isset($_GET['date'])) {
+                $since = filter_var($_GET['since_version'], FILTER_VALIDATE_INT);
+                if ($since === false || $since < 0) {
+                    http_response_code(400);
+                    echo json_encode(['error' => 'Неверный since_version (ожидается целое >= 0)']);
+                    break;
+                }
+                // Верхняя граница (эксклюзивная) — пагинация вглубь: клиент
+                // получает новейшие 50 версий, затем запрашивает before=мин.версия
+                // и так до исчерпания. is_string() — та же защита от массивов.
+                $before = null;
+                if (isset($_GET['before_version'])) {
+                    $before = is_string($_GET['before_version'])
+                        ? filter_var($_GET['before_version'], FILTER_VALIDATE_INT)
+                        : false;
+                    if ($before === false || $before <= 0) {
+                        http_response_code(400);
+                        echo json_encode(['error' => 'Неверный before_version (ожидается целое > 0)']);
+                        break;
+                    }
+                }
+                $where = 'version > :since';
+                $s_params = [':since' => $since];
+                if ($before !== null) {
+                    $where .= ' AND version < :before';
+                    $s_params[':before'] = $before;
+                }
+                $s_stmt = $pdo->prepare(
+                    "SELECT version, MAX(changed_at) as changed_at, COUNT(*) as cnt
+                     FROM schedule_history
+                     WHERE $where
+                     GROUP BY version
+                     ORDER BY version DESC
+                     LIMIT 50"
+                );
+                $s_stmt->execute($s_params);
+                $s_rows = $s_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                $s_result = [];
+                if ($s_rows) {
+                    $s_versions = array_column($s_rows, 'version');
+                    $s_ph = implode(',', array_fill(0, count($s_versions), '?'));
+                    $s_det = $pdo->prepare(
+                        "SELECT version, change_type, date, class_name, lesson_num, subject, teacher, room, old_room
+                         FROM schedule_history WHERE version IN ($s_ph)
+                         ORDER BY date, lesson_num, class_name"
+                    );
+                    $s_det->execute($s_versions);
+
+                    $s_details = [];
+                    foreach ($s_det->fetchAll(PDO::FETCH_ASSOC) as $d) {
+                        $s_details[$d['version']][] = $d;
+                    }
+
+                    foreach ($s_rows as $row) {
+                        $s_result[] = [
+                            'version'    => (int)$row['version'],
+                            // Время хранится в UTC — отдаём в самарском
+                            'changed_at' => utc_to_samara($row['changed_at']),
+                            'count'      => (int)$row['cnt'],
+                            'details'    => $s_details[$row['version']] ?? [],
+                        ];
+                    }
+                }
+                echo json_encode(['history' => $s_result]);
+                break;
+            }
+
             // С фильтром по классу/учителю/дате — плоский список изменений.
             // is_string(): ?class[]=x превратил бы значение в массив и уронил
             // PDO в исключение (HTTP 500), как это уже защищено в 'schedule'.
@@ -501,7 +577,14 @@ try {
 
         case 'last_import':
             $row = $pdo->query("SELECT imported_at, status FROM import_log ORDER BY id DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
-            $chk = $pdo->query("SELECT MAX(last_checked_at) c FROM schedule_sources WHERE is_active = 1")->fetch(PDO::FETCH_ASSOC);
+            // Последняя проверка метаданных — по ВСЕМ источникам, а не только
+            // активным: при отключённых источниках checked_at иначе теряется
+            // и клиенты показывают вместо неё время последнего импорта
+            $chk = $pdo->query("SELECT MAX(last_checked_at) c FROM schedule_sources")->fetch(PDO::FETCH_ASSOC);
+            if (empty($chk['c'])) {
+                // Источников нет или ни разу не проверялись — фолбек на журнал проверок
+                $chk = $pdo->query("SELECT MAX(checked_at) c FROM check_log")->fetch(PDO::FETCH_ASSOC);
+            }
             echo json_encode([
                 // Время хранится в UTC — отдаём в самарском
                 'imported_at' => isset($row['imported_at']) ? utc_to_samara($row['imported_at']) : null,
