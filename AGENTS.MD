@@ -16,6 +16,8 @@
 ├── index.html          # Главная — расписание учеников
 ├── teachers.html       # Расписание учителей
 ├── free.html           # Свободные аудитории (корпус + дата + время, сетка плиток)
+├── android.html        # Лендинг приложения Android: скачивание APK + RuStore («скоро», модерация)
+├── downloads/          # Установочные файлы: schedule-<version>.apk (из релиза r-android)
 ├── history.php         # Страница «Изменения расписания» (публичная)
 ├── admin.php           # Админ-панель (вход + импорт + управление источниками)
 ├── admin.js            # Клиентская логика админ-панели (вынесена из admin.php ради CSP)
@@ -146,10 +148,23 @@ php -S localhost:8000
 ### Изменить тему оформления
 Редактировать CSS-переменные в `:root` и `[data-theme="dark"]` в `style.css`.
 
+### Обновить APK в downloads/
+1. Собрать релиз: `r-android\gradlew.bat :app:bundleRelease` или переиспользовать существующую сборку.
+2. Скопировать `r-android/app/build/outputs/apk/release/app-release.apk` → `r-web/downloads/schedule-<версия>.apk` (имя версионируется, чтобы кэш браузера/nginx не отдавал старую сборку).
+3. Обновить версию/размер на лендинге `android.html`, если они менялись.
+4. Nginx отдаёт APK с `application/vnd.android.package-archive` и долгим кэшем (location `\.apk$`).
+
 ## File Reference
 
 | Файл | Назначение |
 |---|---|
+| `index.html` | Главная — расписание учеников (шапка с ссылкой на android.html) |
+| `teachers.html` | Расписание учителей (шапка с ссылкой на android.html) |
+| `free.html` | Свободные аудитории (шапка с ссылкой на android.html) |
+| `android.html` | Лендинг приложения: кнопка «Скачать APK» + неактивная карточка RuStore |
+| `RuStore_logo.svg.png` | Логотип RuStore для лендинга |
+| `android-icon.png` | Иконка Android-робота в шапке (ссылка на android.html) |
+| `downloads/` | APK для лендинга (`schedule-<version>.apk`) |
 | `api.php` | Единая точка входа для всех API-запросов |
 | `src/db.php` | Подключение к SQLite, миграции схемы |
 | `src/auth.php` | Авторизация ( session + password_hash ) |
