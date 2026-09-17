@@ -77,7 +77,7 @@ function renderCards(lessons, mode, nowStatus) {
             <div class="lesson-num">${esc(String(l.lesson_num))}</div>
             <div class="lesson-subject">${esc(l.subject)}${l.parallel_group ? ` <span class="group">(${esc(l.parallel_group)})</span>` : ''}</div>
             <div class="lesson-meta">${extra}</div>
-            ${l.room ? `<div class="lesson-room${l.room.length >= 7 ? ' room-long' : ''}">${esc(l.room)}</div>` : ''}
+            ${l.room ? `<div class="lesson-room${l.room.length >= 7 ? ' room-long' : ''}${l.room_corrected ? ' room-corrected' : ''}" title="Аудитория изменена администратором">${esc(l.room)}</div>` : ''}
             <div class="lesson-time">${esc(l.time_start)}–${esc(l.time_end)}</div>
         </div>`;
 
@@ -116,7 +116,7 @@ function renderTable(lessons, mode, nowStatus) {
         } else {
             h += `<td>${esc(l.class_name)}</td>`;
         }
-        h += `<td class="col-room">${esc(l.room)}</td></tr>`;
+        h += `<td class="col-room${l.room_corrected ? ' room-corrected' : ''}"${l.room_corrected ? ' title="Аудитория изменена администратором"' : ''}>${esc(l.room)}</td></tr>`;
 
         if (nowStatus && nowStatus.type === 'break' && nowStatus.after === i) {
             h += `<tr class="row-break"><td colspan="5"><div class="break-now">сейчас перерыв</div></td></tr>`;

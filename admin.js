@@ -101,6 +101,10 @@ document.addEventListener('submit', function(e) {
         if (!confirm('Удалить источник?')) e.preventDefault();
         return;
     }
+    if (f && f.classList && f.classList.contains('form-delete-correction')) {
+        if (!confirm('Удалить корректировку?')) e.preventDefault();
+        return;
+    }
     // Кнопка «Импортировать все»: блокируем повторный сабмит (был inline onclick)
     var btn = f.querySelector && f.querySelector('button[name="import_all"]');
     if (btn) {
@@ -130,5 +134,105 @@ tabBtns.forEach(function(b) {
         activateTab(saved);
     } else if (tabBtns.length) {
         activateTab(tabBtns[0].dataset.tab);
+    }
+})();
+
+/* Корректировки аудиторий: загрузка уроков класса на дату (публичный API),
+ * заполнение селекта урока и скрытых полей формы */
+(function() {
+    var classSel = document.getElementById('corrClass');
+    var dateInp = document.getElementById('corrDate');
+    var lessonSel = document.getElementById('corrLesson');
+    if (!classSel || !dateInp || !lessonSel) return;
+
+    function esc(s) {
+        var d = document.createElement('div');
+        d.textContent = s == null ? '' : s;
+        return d.textContent;
+    }
+
+    function fillHidden(l) {
+        document.getElementById('corrLessonNum').value = l.lesson_num || '';
+        document.getElementById('corrTimeStart').value = l.time_start || '';
+        document.getElementById('corrTimeEnd').value = l.time_end || '';
+        document.getElementById('corrSubject').value = l.subject || '';
+        document.getElementById('corrTeacher').value = l.teacher || '';
+        document.getElementById('corrRoomOld').value = l.room || '';
+    }
+
+    function loadLessons() {
+        var cls = classSel.value;
+        var date = dateInp.value;
+        fillHidden({});
+        lessonSel.innerHTML = '';
+        var ph = document.createElement('option');
+        lessonSel.appendChild(ph);
+        if (!cls || !date) {
+            ph.value = '';
+            ph.textContent = 'Сначала выберите класс и дату';
+            lessonSel.disabled = true;
+            lessonSel.required = false;
+            return;
+        }
+        ph.textContent = 'Загрузка…';
+        fetch('api.php?action=schedule&class=' + encodeURIComponent(cls) + '&date=' + encodeURIComponent(date))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                lessonSel.innerHTML = '';
+                var lessons = (data && data.schedule) || [];
+                if (!lessons.length) {
+                    ph.value = '';
+                    ph.textContent = 'Нет уроков на эту дату';
+                    lessonSel.disabled = true;
+                    lessonSel.required = false;
+                    return;
+                }
+                ph.value = '';
+                ph.textContent = 'Выберите урок…';
+                // Группируем параллельные группы: option на каждый слот
+                lessons.forEach(function(l) {
+                    var o = document.createElement('option');
+                    o.value = JSON.stringify(l);
+                    o.dataset.lesson = '1';
+                    var parts = [];
+                    if (l.parallel_group) parts.push(l.parallel_group);
+                    if (l.teacher) parts.push(l.teacher);
+                    var text = '№' + l.lesson_num + ' ' + l.time_start + '-' + l.time_end +
+                               ' ' + l.subject + (parts.length ? ' (' + parts.join(', ') + ')' : '') +
+                               ' — ' + l.room;
+                    o.textContent = text;
+                    lessonSel.appendChild(o);
+                });
+                lessonSel.disabled = false;
+                lessonSel.required = true;
+            })
+            .catch(function() {
+                lessonSel.innerHTML = '';
+                var e = document.createElement('option');
+                e.value = '';
+                e.textContent = 'Ошибка загрузки расписания';
+                lessonSel.appendChild(e);
+                lessonSel.disabled = true;
+                lessonSel.required = false;
+            });
+    }
+
+    lessonSel.addEventListener('change', function() {
+        if (!lessonSel.value) { fillHidden({}); return; }
+        try {
+            fillHidden(JSON.parse(lessonSel.value));
+        } catch (err) {
+            fillHidden({});
+        }
+    });
+
+    classSel.addEventListener('change', loadLessons);
+    dateInp.addEventListener('change', loadLessons);
+
+    // Даты нет в POST при загрузке страницы — ставим сегодня по умолчанию
+    if (!dateInp.value) {
+        var now = new Date();
+        var pad = function(n) { return (n < 10 ? '0' : '') + n; };
+        dateInp.value = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
     }
 })();

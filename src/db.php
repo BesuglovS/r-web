@@ -123,8 +123,9 @@ function init_db(PDO $pdo): void
     // 3 = актуальная схема (+check_log, md5-колонки в schedule_sources),
     // 4 = + колонка last_dates в schedule_sources (даты, покрытые источником),
     // 5 = + таблица аудиторий rooms (привязка к корпусам, сид начального списка).
+    // 6 = + таблица room_corrections (корректировки аудиторий администратором).
     $ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-    if ($ver >= 5) {
+    if ($ver >= 6) {
         $inited[$key] = true;
         return;
     }
@@ -224,9 +225,11 @@ function init_db(PDO $pdo): void
     migrate_link_txt($pdo);
     migrate_timestamps_to_utc($pdo);
 
+    migrate_room_corrections($pdo);
+
     // Поднять версию схемы (после UTC-миграции, чтобы она успела отработать на старых БД)
-    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 5) {
-        $pdo->exec('PRAGMA user_version = 5');
+    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 6) {
+        $pdo->exec('PRAGMA user_version = 6');
     }
 
     $inited[$key] = true;
@@ -304,6 +307,38 @@ function migrate_rooms(PDO $pdo): void
             $stmt->execute([$name, $building]);
         }
     }
+}
+
+/**
+ * Корректировки аудиторий администратором (миграция v6).
+ * Каждая строка — замена аудитории одного слота расписания на конкретную дату.
+ * Ключ (соединение с schedule): date + class_name + lesson_num + time_start.
+ * Субъект/учитель хранятся для отображения; при применении корректировки
+ * совпадение ищется по ключевым колонкам, чтобы правки переживали импорты.
+ * Одна корректировка на слот — повторное сохранение перезаписывает (upsert).
+ */
+function migrate_room_corrections(PDO $pdo): void
+{
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS room_corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            lesson_num INTEGER NOT NULL,
+            time_start TEXT NOT NULL,
+            time_end TEXT DEFAULT '',
+            subject TEXT DEFAULT '',
+            teacher TEXT DEFAULT '',
+            room_old TEXT DEFAULT '',
+            room_new TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    ");
+    $pdo->exec("
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_room_corr_key
+        ON room_corrections(date, class_name, lesson_num, time_start)
+    ");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_room_corr_date ON room_corrections(date)");
 }
 
 /**

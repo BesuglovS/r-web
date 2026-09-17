@@ -200,24 +200,33 @@ try {
                 break;
             }
             if ($class) {
-                $conditions[] = 'class_name = :class';
+                $conditions[] = 's.class_name = :class';
                 $params[':class'] = $class;
             }
             if ($teacher) {
-                $conditions[] = 'teacher = :teacher';
+                $conditions[] = 's.teacher = :teacher';
                 $params[':teacher'] = $teacher;
             }
             if ($date) {
-                $conditions[] = 'date = :date';
+                $conditions[] = 's.date = :date';
                 $params[':date'] = $date;
             }
 
             $where = $conditions ? 'WHERE ' . implode(' AND ', $conditions) : '';
 
-            $sql = "SELECT date, day_of_week, class_name, lesson_num, time_start, time_end,
-                           subject, teacher, room, parallel_group, imported_at
-                    FROM schedule $where
-                    ORDER BY date, time_start, lesson_num, class_name";
+            $sql = "SELECT s.date, s.day_of_week, s.class_name, s.lesson_num, s.time_start, s.time_end,
+                           s.subject, s.teacher,
+                           COALESCE(rc.room_new, s.room) AS room,
+                           rc.room_new IS NOT NULL AS room_corrected,
+                           s.parallel_group, s.imported_at
+                    FROM schedule s
+                    LEFT JOIN room_corrections rc
+                        ON rc.date = s.date
+                       AND rc.class_name = s.class_name
+                       AND rc.lesson_num = s.lesson_num
+                       AND rc.time_start = s.time_start
+                    $where
+                    ORDER BY s.date, s.time_start, s.lesson_num, s.class_name";
             $stmt = $pdo->prepare($sql);
             $stmt->execute($params);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -292,21 +301,35 @@ try {
             // Занятость на момент времени. Сравнение строк «HH:MM» (в БД время
             // с нулевым паддингом); substr('0'||time_start,-5) подстраховка от
             // незападенных '9:00' в будущих импортах.
+            // Корректировки аудиторий: эффективная аудитория слота —
+            // COALESCE(rc.room_new, s.room); учитываем и старую, и новую
+            // аудиторию в WHERE, финальную фильтрацию делаем в PHP.
             $occupied = [];
             if ($room_names) {
                 $fph = implode(',', array_fill(0, count($room_names), '?'));
                 $fstmt = $pdo->prepare(
-                    "SELECT room, lesson_num, time_start, time_end, subject, teacher, class_name, parallel_group
-                     FROM schedule
-                     WHERE date = ? AND room IN ($fph)
-                       AND substr('0'||time_start,-5) <= ?
-                       AND substr('0'||time_end,-5) > ?"
+                    "SELECT COALESCE(rc.room_new, s.room) AS eff_room,
+                            s.lesson_num, s.time_start, s.time_end,
+                            s.subject, s.teacher, s.class_name, s.parallel_group
+                     FROM schedule s
+                     LEFT JOIN room_corrections rc
+                         ON rc.date = s.date
+                        AND rc.class_name = s.class_name
+                        AND rc.lesson_num = s.lesson_num
+                        AND rc.time_start = s.time_start
+                     WHERE s.date = ?
+                       AND (s.room IN ($fph) OR rc.room_new IN ($fph))
+                       AND substr('0'||s.time_start,-5) <= ?
+                       AND substr('0'||s.time_end,-5) > ?"
                 );
-                $fstmt->execute(array_merge([$fdate], $room_names, [$ftime, $ftime]));
+                $fstmt->execute(array_merge([$fdate], $room_names, $room_names, [$ftime, $ftime]));
                 foreach ($fstmt->fetchAll(PDO::FETCH_ASSOC) as $frow) {
+                    if ($frow['eff_room'] === null || !in_array($frow['eff_room'], $room_names, true)) {
+                        continue;
+                    }
                     // Параллельные группы могут делить аудиторию — достаточно одного слота
-                    if (!isset($occupied[$frow['room']])) {
-                        $occupied[$frow['room']] = $frow;
+                    if (!isset($occupied[$frow['eff_room']])) {
+                        $occupied[$frow['eff_room']] = $frow;
                     }
                 }
             }
