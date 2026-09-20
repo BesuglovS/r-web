@@ -162,6 +162,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
             $message = 'Ошибка: ' . $e->getMessage();
             $message_type = 'error';
         }
+    } elseif (isset($_POST['import_source'])) {
+        $id = (int)($_POST['source_id'] ?? 0);
+        $spdo = get_db();
+        try {
+            if ($spdo === null) throw new Exception('БД недоступна');
+            init_db($spdo);
+            $src = null;
+            foreach (get_sources($spdo) as $s) {
+                if ((int)$s['id'] === $id) { $src = $s; break; }
+            }
+            if ($src === null) throw new Exception('Источник не найден');
+            $result = do_import($src['url'], $spdo);
+            update_source_status($id, $result['status'] ?? 'ok', '', $spdo);
+            update_source_dates($spdo, $id, $result['dates'] ?? []);
+            $lessons = (int)($result['lessons'] ?? 0);
+            $label = trim((string)$src['label']) !== '' ? $src['label'] : $src['url'];
+            $message = "«{$label}»: импортировано {$lessons} уроков";
+            $message_type = 'success';
+        } catch (Exception $e) {
+            if ($spdo !== null) {
+                update_source_status($id, 'error', $e->getMessage(), $spdo);
+            }
+            $message = 'Ошибка: ' . $e->getMessage();
+            $message_type = 'error';
+        }
     }
 }
 
@@ -356,6 +381,9 @@ foreach ($log as $entry) {
         .source-error-text { color: #f87171; font-size: .75rem; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .btn-edit { background: #1e40af; color: #bfdbfe; }
         .btn-edit:hover { background: #1d4ed8; }
+        .btn-import { background: #059669; color: #d1fae5; }
+        .btn-import:hover { background: #047857; }
+        .btn-import:disabled { background: #475569; color: #cbd5e1; cursor: wait; }
         .edit-input {
             width: 100%;
             padding: .35rem .6rem;
@@ -528,6 +556,12 @@ foreach ($log as $entry) {
                                         <button type="button" class="btn-sm btn-edit"
                                                 data-url="<?= htmlspecialchars($src['url']) ?>"
                                                 data-label="<?= htmlspecialchars($src['label']) ?>">Ред.</button>
+                                        <form method="POST" style="display:inline;" class="form-import-source">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="source_id" value="<?= (int)$src['id'] ?>">
+                                            <button type="submit" name="import_source" value="1"
+                                                    class="btn-sm btn-import">Импорт</button>
+                                        </form>
                                         <form method="POST" style="display:inline;">
                                             <?= csrf_field() ?>
                                             <input type="hidden" name="source_id" value="<?= (int)$src['id'] ?>">

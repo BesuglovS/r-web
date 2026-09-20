@@ -105,6 +105,15 @@ document.addEventListener('submit', function(e) {
         if (!confirm('Удалить корректировку?')) e.preventDefault();
         return;
     }
+    // Ручной импорт одного источника: блокируем повторный сабмит
+    if (f && f.classList && f.classList.contains('form-import-source')) {
+        var ib = f.querySelector('button[name="import_source"]');
+        if (ib) {
+            ib.disabled = true;
+            ib.textContent = 'Импорт...';
+        }
+        return;
+    }
     // Кнопка «Импортировать все»: блокируем повторный сабмит (был inline onclick)
     var btn = f.querySelector && f.querySelector('button[name="import_all"]');
     if (btn) {
