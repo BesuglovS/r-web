@@ -191,8 +191,16 @@ function parse_sheet(string $xml_data, array $strings, string $sheet_name): arra
 
     $blocks = extract_blocks($rows);
     $lessons = [];
+    $sheet_day = parse_sheet_date($sheet_name)['day_of_week'];
 
     foreach ($blocks as $block) {
+        // Блок с чужим днём недели в левом верхнем углу (не совпадает с днём
+        // в названии листа) — не импортируем: его данные относятся к другому дню.
+        if ($sheet_day !== '' && !empty($block['day'])
+            && mb_strtolower($block['day']) !== $sheet_day) {
+            continue;
+        }
+
         $class_name = $block['class'];
         foreach ($block['lessons'] as $lesson) {
             $parsed = parse_lesson_cell($lesson['cell'] ?? '');
@@ -250,7 +258,7 @@ function extract_blocks(array $rows): array
         foreach ($rows as $cells) {
             $v = $cells[$off] ?? '';
             if ($v !== '' && preg_match($time_pattern, $v)) {
-                $bands[] = ['offset' => (int)$off, 'class' => null, 'lessons' => [], 'skip' => false];
+                $bands[] = ['offset' => (int)$off, 'class' => null, 'day' => '', 'lessons' => [], 'skip' => false];
                 break;
             }
         }
@@ -268,6 +276,7 @@ function extract_blocks(array $rows): array
     foreach ($rows as $rn => $cells) {
         $is_header_any = false;
         $band_classes = [];
+        $band_days = [];
         foreach ($bands as $bi => $band) {
             $go = $band['offset'];
             $cell0 = $cells[$go] ?? '';
@@ -275,9 +284,13 @@ function extract_blocks(array $rows): array
             if ($cell0 && preg_match($day_pattern, $cell0)
                 && $cell2 && preg_match($class_pattern, $cell2)) {
                 $band_classes[$bi] = $cell2;
+                // День недели из левого верхнего угла блока — сверяется с
+                // днём из названия листа, чтобы не импортировать чужой блок.
+                $band_days[$bi] = $cell0;
                 $is_header_any = true;
             } else {
                 $band_classes[$bi] = null;
+                $band_days[$bi] = null;
             }
         }
 
@@ -298,6 +311,7 @@ function extract_blocks(array $rows): array
                 if ($band['class'] && !empty($band['lessons'])) {
                     $completed_blocks[] = [
                         'class'   => $band['class'],
+                        'day'     => $band['day'],
                         'lessons' => $band['lessons'],
                     ];
                     $bands[$bi]['lessons'] = [];
@@ -316,6 +330,7 @@ function extract_blocks(array $rows): array
                 if ($band['class'] && !empty($band['lessons'])) {
                     $completed_blocks[] = [
                         'class'   => $band['class'],
+                        'day'     => $band['day'],
                         'lessons' => $band['lessons'],
                     ];
                 }
@@ -330,6 +345,7 @@ function extract_blocks(array $rows): array
                     }
                 }
                 $bands[$bi]['class'] = $dup ? null : $band_classes[$bi];
+                $bands[$bi]['day'] = $band_days[$bi] ?? '';
                 $bands[$bi]['skip'] = $dup;
                 $bands[$bi]['lessons'] = [];
                 continue;
@@ -378,6 +394,7 @@ function extract_blocks(array $rows): array
         if ($band['class'] && !empty($band['lessons'])) {
             $completed_blocks[] = [
                 'class'   => $band['class'],
+                'day'     => $band['day'],
                 'lessons' => $band['lessons'],
             ];
         }

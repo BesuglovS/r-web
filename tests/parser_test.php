@@ -171,6 +171,23 @@ $fives = array_values(array_filter($blocks, fn($b) => $b['class'] === '5Ж'));
 check('5Ж: только одна полоса (дубль вне блока не импортируется)', count($fives) === 1 && count($fives[0]['lessons']) === 4);
 $ru = array_filter($fives[0]['lessons'] ?? [], fn($l) => mb_strpos($l['cell'], 'Русский') === 0);
 check('5Ж: уроки первой полосы не потеряны', count($ru) === 1);
+check('extract_blocks: день недели сохранён в блоке', (bool)array_filter($blocks, fn($b) => ($b['day'] ?? '') === 'ПОНЕДЕЛЬНИК'));
+
+/* ── parse_sheet: день недели в левом верхнем углу блока ── */
+echo "parse_sheet (день недели блока):\n";
+$strings2 = [
+    0 => 'ПОНЕДЕЛЬНИК',
+    1 => '5А',
+    2 => '9:00-10:45',
+    3 => 'Математика/Иванова (204)',
+];
+$ws = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    . '<worksheet xmlns="' . NS_MAIN . '"><sheetData>'
+    . '<row r="1">' . cell_xml('A1', 0) . cell_xml('C1', 1) . '</row>'
+    . '<row r="2">' . cell_xml('A2', 2) . cell_xml('B2', '1', false) . cell_xml('C2', 3) . '</row>'
+    . '</sheetData></worksheet>';
+check('день блока = день листа → урок импортирован', count(parse_sheet($ws, $strings2, 'ПН 22.09')) === 1);
+check('день блока ≠ день листа → блок пропущен', count(parse_sheet($ws, $strings2, 'ВТ 23.09')) === 0);
 
 /* ── Вспомогательные функции импорта ── */
 echo "import helpers:\n";
