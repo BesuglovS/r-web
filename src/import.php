@@ -592,6 +592,12 @@ function add_source(string $url, string $label): array
         throw new RuntimeException('Поддерживаются только ссылки на Яндекс.Диск (disk.yandex.ru, yadi.sk)');
     }
 
+    $dup = $pdo->prepare("SELECT id FROM schedule_sources WHERE url = :url");
+    $dup->execute([':url' => $url]);
+    if ($dup->fetchColumn() !== false) {
+        throw new RuntimeException('Источник с такой ссылкой уже добавлен');
+    }
+
     $stmt = $pdo->prepare("INSERT INTO schedule_sources (url, label) VALUES (:url, :label)");
     $stmt->execute([':url' => $url, ':label' => trim($label)]);
 
@@ -626,6 +632,12 @@ function edit_source(int $id, string $url, string $label): array
     }
 
     // last_dates сбрасываем: даты принадлежали старому файлу-источнику
+    $dup = $pdo->prepare("SELECT id FROM schedule_sources WHERE url = :url AND id != :id");
+    $dup->execute([':url' => $url, ':id' => $id]);
+    if ($dup->fetchColumn() !== false) {
+        throw new RuntimeException('Другой источник уже использует эту ссылку');
+    }
+
     $stmt = $pdo->prepare("UPDATE schedule_sources SET url = :url, label = :label, last_dates = NULL WHERE id = :id");
     $stmt->execute([':url' => $url, ':label' => trim($label), ':id' => $id]);
 
