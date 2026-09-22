@@ -124,8 +124,12 @@ function init_db(PDO $pdo): void
     // 4 = + колонка last_dates в schedule_sources (даты, покрытые источником),
     // 5 = + таблица аудиторий rooms (привязка к корпусам, сид начального списка).
     // 6 = + таблица room_corrections (корректировки аудиторий администратором).
+    // 7 = + таблица schedule_edits (правки расписания: edit/add/delete).
+    //     Старые room_corrections переносятся в schedule_edits и больше не используются.
+    // 8 = + base_parallel_group в ключе schedule_edits (правки параллельных групп
+    //     раздельно); существующие правки размножаются по группам.
     $ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-    if ($ver >= 6) {
+    if ($ver >= 8) {
         $inited[$key] = true;
         return;
     }
@@ -225,11 +229,12 @@ function init_db(PDO $pdo): void
     migrate_link_txt($pdo);
     migrate_timestamps_to_utc($pdo);
 
-    migrate_room_corrections($pdo);
+    migrate_schedule_edits($pdo);
+    migrate_edits_parallel_group($pdo);
 
     // Поднять версию схемы (после UTC-миграции, чтобы она успела отработать на старых БД)
-    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 6) {
-        $pdo->exec('PRAGMA user_version = 6');
+    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 8) {
+        $pdo->exec('PRAGMA user_version = 8');
     }
 
     $inited[$key] = true;
@@ -310,35 +315,158 @@ function migrate_rooms(PDO $pdo): void
 }
 
 /**
- * Корректировки аудиторий администратором (миграция v6).
- * Каждая строка — замена аудитории одного слота расписания на конкретную дату.
- * Ключ (соединение с schedule): date + class_name + lesson_num + time_start.
- * Субъект/учитель хранятся для отображения; при применении корректировки
- * совпадение ищется по ключевым колонкам, чтобы правки переживали импорты.
- * Одна корректировка на слот — повторное сохранение перезаписывает (upsert).
+ * Правки расписания администратором (миграция v7, заменяет room_corrections).
+ *
+ * Каждая строка — либо замена полей одного слота расписания ('edit'),
+ * либо добавление нового урока ('add'), либо скрытие урока источника ('delete').
+ *
+ * Ключ сопоставления с schedule (стабильные поля источника, не меняются
+ * при редактировании): date + class_name + base_lesson_num + base_time_start
+ * + base_parallel_group. Параллельные группы идут в одном слоте (тот же номер
+ * и время), поэтому группа входит в ключ — правки групп независимы.
+ * Для добавленных уроков base_lesson_num = 0, base_time_start = '',
+ * base_parallel_group = ''.
+ * Совпадение ищется по ключу, поэтому правки переживают импорты. Если урок
+ * в источнике исчез/сдвинулся — правка сохраняется и «ждёт» совпадения.
+ *
+ * Пустое значение редактируемого поля означает «наследовать из источника»
+ * (для 'edit'); для 'add' пустое значение так и отображается.
  */
-function migrate_room_corrections(PDO $pdo): void
+function migrate_schedule_edits(PDO $pdo): void
 {
     $pdo->exec("
-        CREATE TABLE IF NOT EXISTS room_corrections (
+        CREATE TABLE IF NOT EXISTS schedule_edits (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT NOT NULL,
             class_name TEXT NOT NULL,
-            lesson_num INTEGER NOT NULL,
-            time_start TEXT NOT NULL,
+            base_lesson_num INTEGER NOT NULL DEFAULT 0,
+            base_time_start TEXT NOT NULL DEFAULT '',
+            base_parallel_group TEXT NOT NULL DEFAULT '',
+            change_type TEXT NOT NULL DEFAULT 'edit',
+            lesson_num INTEGER NOT NULL DEFAULT 0,
+            time_start TEXT DEFAULT '',
             time_end TEXT DEFAULT '',
             subject TEXT DEFAULT '',
             teacher TEXT DEFAULT '',
-            room_old TEXT DEFAULT '',
-            room_new TEXT NOT NULL,
+            room TEXT DEFAULT '',
+            parallel_group TEXT DEFAULT '',
             created_at TEXT NOT NULL
         )
     ");
+    // Уникальный индекс по ключу создаёт migrate_edits_parallel_group() —
+    // после того, как на апгрейде появится колонка base_parallel_group
+    // (иначе на БД v7 CREATE INDEX упал бы «no such column»).
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_schedule_edits_date ON schedule_edits(date)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_schedule_edits_class ON schedule_edits(date, class_name)");
+}
+
+/**
+ * Миграция v7 → v8: добавляет base_parallel_group в schedule_edits и
+ * восстанавливает уже сохранённые правки.
+ *
+ * До v8 ключ не включал параллельную группу, поэтому одна правка применялась
+ * ко всем группам слота (date/class/lesson_num/time_start). Чтобы сохранить
+ * прежнее поведение после перехода на ключ с группой, для каждой такой правки
+ * находим группы в schedule и размножаем правку на каждую (если групп нет —
+ * правка осиротела, оставляем как есть).
+ */
+function migrate_edits_parallel_group(PDO $pdo): void
+{
+    $cols = [];
+    foreach ($pdo->query("PRAGMA table_info(schedule_edits)")->fetchAll(PDO::FETCH_ASSOC) as $c) {
+        $cols[$c['name']] = true;
+    }
+    if (!isset($cols['base_parallel_group'])) {
+        $pdo->exec("ALTER TABLE schedule_edits ADD COLUMN base_parallel_group TEXT NOT NULL DEFAULT ''");
+    }
+
+    // Разовая миграция легаси-корректировок аудиторий (v6 → v7). Делаем здесь,
+    // после появления base_parallel_group (иначе на БД v7 INSERT упал бы).
+    // Переносим только замену аудитории: остальные поля пустые = берутся
+    // из источника (прежнее поведение room_corrections). OR IGNORE — для
+    // повторного запуска на БД, где перенос уже был.
+    $legacy_exists = $pdo->query(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_corrections'"
+    )->fetchColumn();
+    if ($legacy_exists) {
+        $pdo->exec("
+            INSERT OR IGNORE INTO schedule_edits
+                (date, class_name, base_lesson_num, base_time_start, base_parallel_group, change_type,
+                 lesson_num, time_start, time_end, subject, teacher, room, parallel_group, created_at)
+            SELECT date, class_name, lesson_num, time_start, '', 'edit',
+                   lesson_num, '', '', '', '', room_new, '', created_at
+            FROM room_corrections
+        ");
+    }
+
+    // Индекс пересоздаём с новым ключом (для v7 без группы и на всякий случай).
+    $pdo->exec("DROP INDEX IF EXISTS idx_schedule_edits_key");
     $pdo->exec("
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_room_corr_key
-        ON room_corrections(date, class_name, lesson_num, time_start)
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_edits_key
+        ON schedule_edits(date, class_name, base_lesson_num, base_time_start, base_parallel_group)
+        WHERE change_type IN ('edit', 'delete')
     ");
-    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_room_corr_date ON room_corrections(date)");
+
+    // Ключи edit/delete без группы (унаследованы от v7)
+    $targets = $pdo->query(
+        "SELECT DISTINCT date, class_name, base_lesson_num, base_time_start
+         FROM schedule_edits
+         WHERE base_parallel_group = '' AND change_type IN ('edit', 'delete')"
+    )->fetchAll(PDO::FETCH_ASSOC);
+    if (empty($targets)) {
+        return;
+    }
+
+    $gstmt = $pdo->prepare(
+        "SELECT DISTINCT COALESCE(parallel_group, '') AS pg
+         FROM schedule
+         WHERE date = ? AND class_name = ? AND lesson_num = ? AND time_start = ?"
+    );
+    $selrow = $pdo->prepare(
+        "SELECT * FROM schedule_edits
+         WHERE date = ? AND class_name = ? AND base_lesson_num = ? AND base_time_start = ?
+           AND base_parallel_group = '' AND change_type IN ('edit', 'delete')
+         LIMIT 1"
+    );
+    $upd = $pdo->prepare(
+        "UPDATE schedule_edits SET base_parallel_group = ?
+         WHERE date = ? AND class_name = ? AND base_lesson_num = ? AND base_time_start = ?
+           AND base_parallel_group = '' AND change_type IN ('edit', 'delete')"
+    );
+    $ins = $pdo->prepare(
+        "INSERT INTO schedule_edits
+            (date, class_name, base_lesson_num, base_time_start, base_parallel_group, change_type,
+             lesson_num, time_start, time_end, subject, teacher, room, parallel_group, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+
+    foreach ($targets as $t) {
+        $args = [$t['date'], $t['class_name'], $t['base_lesson_num'], $t['base_time_start']];
+        $gstmt->execute($args);
+        $groups = $gstmt->fetchAll(PDO::FETCH_COLUMN);
+        if (empty($groups)) {
+            continue; // нет совпадающих уроков — правка остаётся осиротевшей
+        }
+        sort($groups);
+
+        // Шаблон правки — до проставления группы
+        $selrow->execute($args);
+        $tpl = $selrow->fetch(PDO::FETCH_ASSOC);
+        if ($tpl === false) {
+            continue;
+        }
+
+        $first = array_shift($groups);
+        $upd->execute(array_merge([$first], $args));
+
+        foreach ($groups as $g) {
+            $ins->execute([
+                $tpl['date'], $tpl['class_name'], $tpl['base_lesson_num'], $tpl['base_time_start'], $g,
+                $tpl['change_type'], $tpl['lesson_num'], $tpl['time_start'], $tpl['time_end'],
+                $tpl['subject'], $tpl['teacher'], $tpl['room'], $tpl['parallel_group'], $tpl['created_at'],
+            ]);
+        }
+    }
 }
 
 /**

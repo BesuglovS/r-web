@@ -94,58 +94,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
                 $message_type = 'error';
             }
         }
-    } elseif (isset($_POST['add_correction'])) {
-        $c_date = trim($_POST['corr_date'] ?? '');
-        $c_class = trim($_POST['corr_class'] ?? '');
-        $c_lesson = (int)($_POST['corr_lesson_num'] ?? 0);
-        $c_tstart = trim($_POST['corr_time_start'] ?? '');
-        $c_tend = trim($_POST['corr_time_end'] ?? '');
-        $c_subject = trim($_POST['corr_subject'] ?? '');
-        $c_teacher = trim($_POST['corr_teacher'] ?? '');
-        $c_room_old = trim($_POST['corr_room_old'] ?? '');
-        $c_room_new = trim($_POST['corr_room_new'] ?? '');
-        try {
-            $cpdo = get_db();
-            if ($cpdo === null) throw new Exception('БД недоступна');
-            init_db($cpdo);
-            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $c_date) || $c_class === ''
-                || $c_lesson <= 0 || !preg_match('/^\d{1,2}:\d{2}$/', $c_tstart) || $c_room_new === '') {
-                throw new Exception('Неверные данные корректировки');
-            }
-            $c_tstart = sprintf('%02d:%02d', (int)strstr($c_tstart, ':', true), (int)substr(strstr($c_tstart, ':'), 1));
-            $ups = $cpdo->prepare(
-                "INSERT INTO room_corrections
-                    (date, class_name, lesson_num, time_start, time_end, subject, teacher, room_old, room_new, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(date, class_name, lesson_num, time_start)
-                 DO UPDATE SET time_end = excluded.time_end, subject = excluded.subject,
-                               teacher = excluded.teacher, room_old = excluded.room_old,
-                               room_new = excluded.room_new, created_at = excluded.created_at"
-            );
-            $ups->execute([
-                $c_date, $c_class, $c_lesson, $c_tstart,
-                $c_tend, $c_subject, $c_teacher, $c_room_old, $c_room_new,
-                gmdate('Y-m-d H:i:s'),
-            ]);
-            $message = 'Корректировка сохранена';
-            $message_type = 'success';
-        } catch (Exception $e) {
-            $message = 'Ошибка: ' . $e->getMessage();
-            $message_type = 'error';
-        }
-    } elseif (isset($_POST['delete_correction'])) {
-        $id = (int)($_POST['correction_id'] ?? 0);
-        try {
-            $cpdo = get_db();
-            if ($cpdo === null) throw new Exception('БД недоступна');
-            init_db($cpdo);
-            $cpdo->prepare("DELETE FROM room_corrections WHERE id = ?")->execute([$id]);
-            $message = 'Корректировка удалена';
-            $message_type = 'success';
-        } catch (Exception $e) {
-            $message = 'Ошибка: ' . $e->getMessage();
-            $message_type = 'error';
-        }
     } elseif (isset($_POST['import_all'])) {
         try {
             $result = do_import_all();
@@ -223,9 +171,6 @@ $sources = get_sources();
 
 $log = [];
 $check_log = [];
-$corrections = [];
-$all_classes = [];
-$all_rooms = [];
 $last_import = null;
 $pdo = get_db();
 if ($pdo !== null) {
@@ -234,24 +179,6 @@ if ($pdo !== null) {
         $log = $pdo->query("SELECT * FROM import_log ORDER BY id DESC LIMIT 20")->fetchAll(PDO::FETCH_ASSOC);
         $last_import = $pdo->query("SELECT imported_at, status, error_message FROM import_log ORDER BY id DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
         $check_log = $pdo->query("SELECT * FROM check_log ORDER BY id DESC LIMIT 30")->fetchAll(PDO::FETCH_ASSOC);
-        // Корректировки аудиторий: актуальное состояние слота из schedule —
-        // чтобы показать его текущее (возможно, изменившееся) описание
-        $corrections = $pdo->query(
-            "SELECT rc.*, s.time_start AS cur_time_start, s.time_end AS cur_time_end,
-                    s.subject AS cur_subject, s.teacher AS cur_teacher, s.room AS cur_room
-             FROM room_corrections rc
-             LEFT JOIN schedule s
-                 ON s.date = rc.date
-                AND s.class_name = rc.class_name
-                AND s.lesson_num = rc.lesson_num
-                AND s.time_start = rc.time_start
-                AND s.subject = rc.subject
-                AND s.teacher = rc.teacher
-             ORDER BY rc.date DESC, rc.time_start, rc.class_name
-             LIMIT 200"
-        )->fetchAll(PDO::FETCH_ASSOC);
-        $all_classes = $pdo->query("SELECT DISTINCT class_name FROM schedule ORDER BY class_name")->fetchAll(PDO::FETCH_COLUMN);
-        $all_rooms = $pdo->query("SELECT name FROM rooms WHERE is_active = 1 ORDER BY name")->fetchAll(PDO::FETCH_COLUMN);
     } catch (Exception $e) {
         // ignore
     }
@@ -287,8 +214,20 @@ foreach ($log as $entry) {
         .container { max-width: 800px; margin: 0 auto; }
         h1 { font-size: 1.6rem; margin-bottom: 1.5rem; }
         .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
+        .top-bar-links { display: flex; gap: 1rem; align-items: center; }
         .top-bar a { color: #94a3b8; text-decoration: none; font-size: .9rem; }
         .top-bar a:hover { color: #e2e8f0; }
+
+        .link-button {
+            display: inline-block;
+            padding: .6rem 1.25rem;
+            border-radius: .5rem;
+            background: #3b82f6;
+            color: #fff;
+            text-decoration: none;
+            font-size: .9rem;
+        }
+        .link-button:hover { background: #2563eb; }
 
         .card {
             background: #1e293b;
@@ -463,7 +402,10 @@ foreach ($log as $entry) {
     <div class="container">
         <div class="top-bar">
             <h1>Импорт расписания</h1>
-            <a href="?logout">Выйти</a>
+            <div class="top-bar-links">
+                <a href="admin_edit.php">Правки расписания</a>
+                <a href="?logout">Выйти</a>
+            </div>
         </div>
 
         <?php if ($message): ?>
@@ -593,83 +535,12 @@ foreach ($log as $entry) {
         </div>
 
         <div class="card">
-            <h2>Корректировки аудиторий</h2>
+            <h2>Правки расписания</h2>
             <p class="hint" style="margin:0 0 1rem;">
-                Замена аудитории у урока на конкретную дату. Корректировки применяются
-                к расписанию автоматически и не затираются при импорте.
+                Ручные правки уроков (время, предмет, учитель, аудитория, добавление
+                и скрытие уроков). Применяются автоматически и не затираются при импорте.
             </p>
-
-            <form class="source-form correction-form" method="POST" style="margin-bottom: 1rem;">
-                <?= csrf_field() ?>
-                <select name="corr_class" id="corrClass" required style="padding:.65rem 1rem;border:1px solid #334155;border-radius:.5rem;background:#0f172a;color:#e2e8f0;font-size:.95rem;">
-                    <option value="">Класс…</option>
-                    <?php foreach ($all_classes as $cls): ?>
-                        <option value="<?= htmlspecialchars($cls) ?>"><?= htmlspecialchars($cls) ?></option>
-                    <?php endforeach; ?>
-                </select>
-                <input type="date" name="corr_date" id="corrDate" required
-                       style="padding:.65rem .75rem;border:1px solid #334155;border-radius:.5rem;background:#0f172a;color:#e2e8f0;font-size:.95rem;">
-                <select name="corr_lesson" id="corrLesson" style="min-width:280px;padding:.65rem 1rem;border:1px solid #334155;border-radius:.5rem;background:#0f172a;color:#e2e8f0;font-size:.95rem;" disabled>
-                    <option value="">Сначала выберите класс и дату</option>
-                </select>
-                <select name="corr_room_new" id="corrRoom" required style="padding:.65rem 1rem;border:1px solid #334155;border-radius:.5rem;background:#0f172a;color:#e2e8f0;font-size:.95rem;">
-                    <option value="">Новая аудитория…</option>
-                    <?php foreach ($all_rooms as $rname): ?>
-                        <option value="<?= htmlspecialchars($rname) ?>"><?= htmlspecialchars($rname) ?></option>
-                    <?php endforeach; ?>
-                </select>
-                <button type="submit" name="add_correction" value="1">Применить</button>
-                <!-- Значения выбранного урока заполняются в admin.js -->
-                <input type="hidden" name="corr_lesson_num" id="corrLessonNum">
-                <input type="hidden" name="corr_time_start" id="corrTimeStart">
-                <input type="hidden" name="corr_time_end" id="corrTimeEnd">
-                <input type="hidden" name="corr_subject" id="corrSubject">
-                <input type="hidden" name="corr_teacher" id="corrTeacher">
-                <input type="hidden" name="corr_room_old" id="corrRoomOld">
-            </form>
-
-            <?php if (empty($corrections)): ?>
-                <p style="color: #64748b;">Корректировок нет</p>
-            <?php else: ?>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Дата</th>
-                            <th>Класс</th>
-                            <th>Урок</th>
-                            <th>Предмет / учитель</th>
-                            <th>Аудитория</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($corrections as $c): ?>
-                            <tr data-id="<?= (int)$c['id'] ?>">
-                                <td><?= htmlspecialchars($c['date']) ?></td>
-                                <td><?= htmlspecialchars($c['class_name']) ?></td>
-                                <td><?= (int)$c['lesson_num'] ?> · <?= htmlspecialchars($c['time_start']) ?>–<?= htmlspecialchars($c['time_end'] ?: '?') ?></td>
-                                <td>
-                                    <?= htmlspecialchars($c['subject']) ?>
-                                    <?php if ($c['teacher']): ?> / <?= htmlspecialchars($c['teacher']) ?><?php endif; ?>
-                                    <?php if ($c['cur_subject'] === null): ?><span class="source-error-text"> (урока больше нет в расписании)</span><?php endif; ?>
-                                </td>
-                                <td>
-                                    <?= htmlspecialchars($c['room_old']) ?> →
-                                    <span class="source-active"><?= htmlspecialchars($c['room_new']) ?></span>
-                                </td>
-                                <td>
-                                    <form method="POST" style="display:inline;" class="form-delete-correction">
-                                        <?= csrf_field() ?>
-                                        <input type="hidden" name="correction_id" value="<?= (int)$c['id'] ?>">
-                                        <button type="submit" name="delete_correction" value="1"
-                                                class="btn-sm btn-delete">Удалить</button>
-                                    </form>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            <?php endif; ?>
+            <a class="link-button" href="admin_edit.php">Открыть страницу правок →</a>
         </div>
 
         <div class="card">

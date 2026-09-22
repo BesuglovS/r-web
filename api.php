@@ -28,6 +28,10 @@
  * POST ?action=source_toggle       — вкл/выкл источник (требует авторизации)
  * POST ?action=source_edit         — изменить источник (требует авторизации)
  * POST ?action=import_all          — импорт по всем активным (требует авторизации)
+ * GET  ?action=edit_data&class=X&date=Y — сырые уроки класса на дату + правки (админ)
+ * GET  ?action=edits               — список правок расписания со статусом (админ)
+ * POST ?action=edit_save           — сохранить правку/добавить урок (админ + CSRF)
+ * POST ?action=edit_delete         — удалить правку (админ + CSRF)
  */
 
 header('Content-Type: application/json; charset=utf-8');
@@ -36,13 +40,15 @@ require_once __DIR__ . '/src/db.php';
 // auth.php подключается ради ensure_session()/api_rate_limit() — сессия для
 // публичных эндпоинтов НЕ стартует (см. api_require_admin)
 require_once __DIR__ . '/src/auth.php';
+require_once __DIR__ . '/src/edits.php';
 
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 // Rate-limit публичных GET-эндпоинтов (справочники, расписание, история).
 // Админ-эндпоинты защищены сессией и не лимитируются.
 $admin_actions = ['import_log', 'check_log', 'sources', 'import', 'import_all',
-                  'source_add', 'source_delete', 'source_toggle', 'source_edit'];
+                  'source_add', 'source_delete', 'source_toggle', 'source_edit',
+                  'edit_data', 'edits', 'edit_save', 'edit_delete'];
 if (!in_array($action, $admin_actions, true)) {
     api_rate_limit();
 }
@@ -124,7 +130,10 @@ try {
 
     switch ($action) {
         case 'classes':
-            $rows = $pdo->query("SELECT DISTINCT class_name FROM schedule")->fetchAll(PDO::FETCH_COLUMN);
+            // Учитываем и классы, добавленные правками администратора
+            $rows = $pdo->query(
+                "SELECT class_name FROM schedule UNION SELECT class_name FROM schedule_edits"
+            )->fetchAll(PDO::FETCH_COLUMN);
             usort($rows, function($a, $b) {
                 preg_match('/^(\d+)/', $a, $ma);
                 preg_match('/^(\d+)/', $b, $mb);
@@ -136,12 +145,20 @@ try {
             break;
 
         case 'teachers':
-            $rows = $pdo->query("SELECT DISTINCT teacher FROM schedule WHERE teacher != '' ORDER BY teacher")->fetchAll(PDO::FETCH_COLUMN);
+            // Учителя из расписания + назначенные правками администратора
+            $rows = $pdo->query(
+                "SELECT teacher FROM schedule WHERE teacher != ''
+                 UNION SELECT teacher FROM schedule_edits WHERE teacher != ''
+                 ORDER BY teacher"
+            )->fetchAll(PDO::FETCH_COLUMN);
             echo json_encode(['teachers' => $rows]);
             break;
 
         case 'weeks':
-            $rows = $pdo->query("SELECT DISTINCT date FROM schedule ORDER BY date")->fetchAll(PDO::FETCH_COLUMN);
+            // Даты расписания + даты, появившиеся из добавленных правок
+            $rows = $pdo->query(
+                "SELECT date FROM schedule UNION SELECT date FROM schedule_edits ORDER BY date"
+            )->fetchAll(PDO::FETCH_COLUMN);
             $weeks = [];
             foreach ($rows as $dateStr) {
                 $dt = new DateTime($dateStr);
@@ -215,21 +232,58 @@ try {
             $where = $conditions ? 'WHERE ' . implode(' AND ', $conditions) : '';
 
             $sql = "SELECT s.date, s.day_of_week, s.class_name, s.lesson_num, s.time_start, s.time_end,
-                           s.subject, s.teacher,
-                           COALESCE(rc.room_new, s.room) AS room,
-                           rc.room_new IS NOT NULL AS room_corrected,
-                           s.parallel_group, s.imported_at
+                           s.subject, s.teacher, s.room, s.parallel_group, s.imported_at
                     FROM schedule s
-                    LEFT JOIN room_corrections rc
-                        ON rc.date = s.date
-                       AND rc.class_name = s.class_name
-                       AND rc.lesson_num = s.lesson_num
-                       AND rc.time_start = s.time_start
                     $where
                     ORDER BY s.date, s.time_start, s.lesson_num, s.class_name";
             $stmt = $pdo->prepare($sql);
             $stmt->execute($params);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            // Правки администратора накладываются поверх расписания при чтении.
+            // Скоуп: по дате и/или классу. Если задан только учитель — правки
+            // берём по дате (если есть), иначе все (для переназначенных уроков).
+            $scope_edits = get_edits($pdo, $date, (string)$class);
+
+            // Урок, переназначенный правкой на искомого учителя, в SQL-выборку
+            // по s.teacher не попадёт — добираем базовые строки по ключам правок.
+            if ($teacher) {
+                $known = [];
+                foreach ($rows as $r) {
+                    $known[schedule_base_key($r)] = true;
+                }
+                $fetch_slot = $pdo->prepare(
+                    "SELECT date, day_of_week, class_name, lesson_num, time_start, time_end,
+                            subject, teacher, room, parallel_group, imported_at
+                     FROM schedule
+                     WHERE date = ? AND class_name = ? AND lesson_num = ? AND time_start = ?"
+                );
+                foreach ($scope_edits as $e) {
+                    if ((string)$e['change_type'] !== 'edit' || (string)$e['teacher'] !== (string)$teacher) {
+                        continue;
+                    }
+                    $fetch_slot->execute([
+                        $e['date'], $e['class_name'], (int)$e['base_lesson_num'], $e['base_time_start'],
+                    ]);
+                    foreach ($fetch_slot->fetchAll(PDO::FETCH_ASSOC) as $brow) {
+                        if (!schedule_groups_compatible($brow['parallel_group'] ?? '', $e['base_parallel_group'] ?? '')) {
+                            continue;
+                        }
+                        $k = schedule_base_key($brow);
+                        if (isset($known[$k])) {
+                            continue;
+                        }
+                        $rows[] = $brow;
+                        $known[$k] = true;
+                    }
+                }
+            }
+
+            $rows = apply_edits($rows, $scope_edits, [
+                'date'    => $date,
+                'class'   => (string)$class,
+                'teacher' => (string)$teacher,
+            ]);
 
             // Время последнего изменения именно этого расписания (класс/учитель + дата).
             // Источник истины — schedule_history.changed_at: imported_at строк перезатирается
@@ -298,60 +352,62 @@ try {
             $rstmt->execute([(int)$fb]);
             $room_names = $rstmt->fetchAll(PDO::FETCH_COLUMN);
 
-            // Занятость на момент времени. Сравнение строк «HH:MM» (в БД время
-            // с нулевым паддингом); substr('0'||time_start,-5) подстраховка от
-            // незападенных '9:00' в будущих импортах.
-            // Корректировки аудиторий: эффективная аудитория слота —
-            // COALESCE(rc.room_new, s.room); учитываем и старую, и новую
-            // аудиторию в WHERE, финальную фильтрацию делаем в PHP.
+            // Все уроки дня + правки администратора (могут менять кабинет/время,
+            // добавлять и скрывать уроки). Эффективный список строим в PHP,
+            // затем фильтруем по корпусу и моменту времени. Сравнение времени —
+            // строками «HH:MM» с нулевым паддингом (substr('0'..,-5) — подстраховка
+            // от незападенных '9:00').
+            $dstmt = $pdo->prepare(
+                "SELECT date, day_of_week, class_name, lesson_num, time_start, time_end,
+                        subject, teacher, room, parallel_group, imported_at
+                 FROM schedule WHERE date = ?"
+            );
+            $dstmt->execute([$fdate]);
+            $effective = apply_edits($dstmt->fetchAll(PDO::FETCH_ASSOC), get_edits($pdo, $fdate, ''), ['date' => $fdate]);
+
+            $pad5 = function (string $t): string {
+                return substr('0' . $t, -5);
+            };
             $occupied = [];
-            if ($room_names) {
-                $fph = implode(',', array_fill(0, count($room_names), '?'));
-                $fstmt = $pdo->prepare(
-                    "SELECT COALESCE(rc.room_new, s.room) AS eff_room,
-                            s.lesson_num, s.time_start, s.time_end,
-                            s.subject, s.teacher, s.class_name, s.parallel_group
-                     FROM schedule s
-                     LEFT JOIN room_corrections rc
-                         ON rc.date = s.date
-                        AND rc.class_name = s.class_name
-                        AND rc.lesson_num = s.lesson_num
-                        AND rc.time_start = s.time_start
-                     WHERE s.date = ?
-                       AND (s.room IN ($fph) OR rc.room_new IN ($fph))
-                       AND substr('0'||s.time_start,-5) <= ?
-                       AND substr('0'||s.time_end,-5) > ?"
-                );
-                $fstmt->execute(array_merge([$fdate], $room_names, $room_names, [$ftime, $ftime]));
-                foreach ($fstmt->fetchAll(PDO::FETCH_ASSOC) as $frow) {
-                    if ($frow['eff_room'] === null || !in_array($frow['eff_room'], $room_names, true)) {
-                        continue;
-                    }
+            foreach ($effective as $frow) {
+                $eff_room = (string)($frow['room'] ?? '');
+                if ($eff_room === '' || !in_array($eff_room, $room_names, true)) {
+                    continue;
+                }
+                if ($pad5((string)$frow['time_start']) <= $ftime && $pad5((string)$frow['time_end']) > $ftime) {
                     // Параллельные группы могут делить аудиторию — достаточно одного слота
-                    if (!isset($occupied[$frow['eff_room']])) {
-                        $occupied[$frow['eff_room']] = $frow;
+                    if (!isset($occupied[$eff_room])) {
+                        $occupied[$eff_room] = $frow;
                     }
                 }
             }
 
             // Интервалы уроков дня — клиент сдвигает авто-время с перемены
             // на начало следующего урока
-            $pstmt = $pdo->prepare(
-                "SELECT DISTINCT time_start, time_end FROM schedule
-                 WHERE date = ? ORDER BY time_start, time_end"
-            );
-            $pstmt->execute([$fdate]);
-            $periods = $pstmt->fetchAll(PDO::FETCH_ASSOC);
+            $periods = [];
+            $starts_map = [];
+            foreach ($effective as $frow) {
+                $ts = (string)$frow['time_start'];
+                $te = (string)$frow['time_end'];
+                $periods[$ts . '|' . $te] = ['time_start' => $ts, 'time_end' => $te];
+                $ln = (int)$frow['lesson_num'];
+                if ($ln >= 1 && (!isset($starts_map[$ln]) || $ts < $starts_map[$ln])) {
+                    $starts_map[$ln] = $ts;
+                }
+            }
+            $periods = array_values($periods);
+            usort($periods, function ($a, $b) {
+                return [$a['time_start'], $a['time_end']] <=> [$b['time_start'], $b['time_end']];
+            });
 
             // Времена начала уроков дня (по номерам уроков) — клиент строит
             // из них выпадающий список выбора времени
-            $lstmt = $pdo->prepare(
-                "SELECT lesson_num, MIN(time_start) AS time_start
-                 FROM schedule WHERE date = ?
-                 GROUP BY lesson_num ORDER BY lesson_num LIMIT 10"
-            );
-            $lstmt->execute([$fdate]);
-            $lesson_starts = $lstmt->fetchAll(PDO::FETCH_ASSOC);
+            ksort($starts_map);
+            $lesson_starts = [];
+            foreach ($starts_map as $ln => $ts) {
+                $lesson_starts[] = ['lesson_num' => $ln, 'time_start' => $ts];
+            }
+            $lesson_starts = array_slice($lesson_starts, 0, 10);
 
             $frooms = [];
             foreach ($room_names as $fname) {
@@ -403,12 +459,31 @@ try {
                 // для воскресенья возвращает воскресенье СЛЕДУЮЩЕЙ недели
                 $sunday = clone $week_dt;
                 $sunday->modify('+6 days');
+                $from = $week_dt->format('Y-m-d');
+                $to = $sunday->format('Y-m-d');
                 $stmt = $pdo->prepare("SELECT DISTINCT date, day_of_week FROM schedule WHERE date >= ? AND date <= ? ORDER BY date");
-                $stmt->execute([$week_dt->format('Y-m-d'), $sunday->format('Y-m-d')]);
+                $stmt->execute([$from, $to]);
+                $estmt = $pdo->prepare("SELECT DISTINCT date FROM schedule_edits WHERE date >= ? AND date <= ?");
+                $estmt->execute([$from, $to]);
             } else {
                 $stmt = $pdo->query("SELECT DISTINCT date, day_of_week FROM schedule ORDER BY date");
+                $estmt = $pdo->query("SELECT DISTINCT date FROM schedule_edits");
             }
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $by_date = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $by_date[$r['date']] = $r['day_of_week'];
+            }
+            // Даты из правок (например, добавленный урок на пустой день)
+            foreach ($estmt->fetchAll(PDO::FETCH_COLUMN) as $d) {
+                if (!isset($by_date[$d])) {
+                    $by_date[$d] = schedule_day_of_week((string)$d);
+                }
+            }
+            ksort($by_date);
+            $rows = [];
+            foreach ($by_date as $d => $dw) {
+                $rows[] = ['date' => $d, 'day_of_week' => $dw];
+            }
             echo json_encode(['dates' => $rows]);
             break;
 
@@ -686,6 +761,69 @@ try {
             require_once __DIR__ . '/src/import.php';
             $result = do_import_all();
             echo json_encode($result);
+            break;
+
+        case 'edit_data':
+            api_require_admin(false);
+
+            $ed_class = isset($_GET['class']) && is_string($_GET['class']) ? trim($_GET['class']) : '';
+            $ed_date = isset($_GET['date']) && is_string($_GET['date']) ? trim($_GET['date']) : '';
+            if ($ed_class === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $ed_date)) {
+                http_response_code(400);
+                echo json_encode(['error' => 'Укажите класс и дату']);
+                break;
+            }
+
+            // Базовые (сырые) уроки без правок — чтобы UI знал исходный ключ
+            $bstmt = $pdo->prepare(
+                "SELECT id, date, day_of_week, class_name, lesson_num, time_start, time_end,
+                        subject, teacher, room, parallel_group
+                 FROM schedule WHERE class_name = ? AND date = ?
+                 ORDER BY time_start, lesson_num"
+            );
+            $bstmt->execute([$ed_class, $ed_date]);
+            $base = $bstmt->fetchAll(PDO::FETCH_ASSOC);
+
+            // Правки по этому классу/дате (включая добавленные уроки)
+            $edits = get_edits($pdo, $ed_date, $ed_class);
+            $rooms = $pdo->query("SELECT name FROM rooms WHERE is_active = 1 ORDER BY name")->fetchAll(PDO::FETCH_COLUMN);
+
+            echo json_encode([
+                'class'  => $ed_class,
+                'date'   => $ed_date,
+                'base'   => $base,
+                'edits'  => $edits,
+                'rooms'  => $rooms,
+            ]);
+            break;
+
+        case 'edits':
+            api_require_admin(false);
+            echo json_encode(['edits' => list_edits_with_status($pdo)]);
+            break;
+
+        case 'edit_save':
+            api_require_admin(true);
+            try {
+                $result = save_edit($pdo, $_POST);
+            } catch (InvalidArgumentException $e) {
+                http_response_code(400);
+                echo json_encode(['error' => $e->getMessage()]);
+                break;
+            }
+            echo json_encode($result);
+            break;
+
+        case 'edit_delete':
+            api_require_admin(true);
+            try {
+                $deleted = delete_edit($pdo, (int)($_POST['id'] ?? 0));
+            } catch (InvalidArgumentException $e) {
+                http_response_code(400);
+                echo json_encode(['error' => $e->getMessage()]);
+                break;
+            }
+            echo json_encode(['status' => 'ok', 'deleted' => $deleted]);
             break;
 
         default:

@@ -21,6 +21,8 @@
 ├── history.php         # Страница «Изменения расписания» (публичная)
 ├── admin.php           # Админ-панель (вход + импорт + управление источниками)
 ├── admin.js            # Клиентская логика админ-панели (вынесена из admin.php ради CSP)
+├── admin_edit.php      # Админ-страница «Правки расписания» (открывается из admin.php)
+├── admin_edit.js       # Клиентская логика страницы правок (внешний JS ради CSP)
 ├── api.php             # JSON API (вся бэкенд-логика)
 ├── app.js              # Фронтенд-логика (fetch, рендеринг, тема)
 ├── free.js             # Логика страницы свободных аудиторий (снап времени на перемене)
@@ -31,6 +33,7 @@
 │   ├── auth.php        # Авторизация администратора (сессия, CSRF, throttle по IP)
 │   ├── db.php          # Подключение SQLite, схема, миграции, очистка логов
 │   ├── import.php      # Логика импорта с Яндекс Диска (md5-опрос, diff, история)
+│   ├── edits.php       # Правки расписания (наложение поверх импорта, CRUD)
 │   └── parser.php      # Минимальный XLSX-парсер (ZipArchive + DOMDocument)
 ├── deploy.ps1          # Скрипт деплоя (PowerShell, SSH)
 ├── r.nayanovaacademy.ru  # Конфиг Nginx
@@ -38,7 +41,7 @@
 ├── .env                # Конфиг деплоя + пароль админа (bcrypt-хеш)
 ├── .gitignore
 ├── link.txt            # Ссылка на XLSX на Яндекс Диске (мигрирует в БД)
-└── tests/              # Тесты: parser_test.php, smoke_db.php (`php tests/parser_test.php`)
+└── tests/              # Тесты: parser_test.php, smoke_db.php, schedule_edits_test.php (`php tests/parser_test.php`)
 ```
 
 ### Database (SQLite)
@@ -52,6 +55,7 @@
 - **`schedule_sources`** — источники XLSX с Яндекс Диска (md5/modified/size, is_active, last_error)
 - **`rooms`** — аудитории с привязкой к корпусам (building: 1 = Чапаевская, 2 = Молодогвардейская, 3 = Ярмарочная; is_active). Сид начального списка — в миграции v5 (`migrate_rooms()`), 61 аудитория
 - **`check_log`** — журнал лёгких проверок метаданных (cron каждые 5 минут)
+- **`schedule_edits`** — правки расписания администратором (миграция v7, заменила `room_corrections`; v8 добавила `base_parallel_group` в ключ): `change_type` = edit/add/delete. Ключ сопоставления с источником — `date + class_name + base_lesson_num + base_time_start + base_parallel_group` (base_* неизменяемы), редактируемые поля — `lesson_num`, `time_start/end`, `subject`, `teacher`, `room`, `parallel_group`. Группа в ключе позволяет править параллельные группы слота независимо. Совпадение группы — «совместимое»: равны либо одна пустая, поэтому правка всего класса (`''`) применяется ко всем подгруппам, а правка подгруппы — к уроку, показанному «группой целиком» (`''`) и наоборот (см. `schedule_groups_compatible()`). Накладываются при чтении (`src/edits.php`), поэтому переживают импорт; осиротевшие правки сохраняются и применяются при совпадении. Легаси `room_corrections` при миграции переносится в `schedule_edits`, а правки без группы размножаются по группам слота
 
 Очистка: `prune_old_data($pdo, 10)` удаляет журнал импортов и проверок старше **10 дней**, историю изменений — старше **90 дней** (вызывается из `do_import()` и `do_check_all()`).
 
@@ -77,8 +81,12 @@
 | `import` | POST | Да + CSRF | Импорт одного источника |
 | `import_all` | POST | Да + CSRF | Импорт всех активных источников |
 | `source_add` / `source_delete` / `source_toggle` / `source_edit` | POST | Да + CSRF | Управление источниками |
+| `edit_data` | GET | Да | Сырые уроки класса на дату + правки + список аудиторий (для редактора) |
+| `edits` | GET | Да | Все правки расписания со статусом «применена/осиротела» |
+| `edit_save` | POST | Да + CSRF | Сохранить правку / добавить урок / скрыть урок |
+| `edit_delete` | POST | Да + CSRF | Удалить правку (вернуть как в источнике) |
 
-Схема миграций: `PRAGMA user_version` (5 = актуальная). Транзакции импорта — `BEGIN IMMEDIATE` (защита от гонки версий истории при параллельных импортах). Публичные GET-эндпоинты ограничены rate-limit'ом по IP (240 запросов/мин, файл под flock).
+Схема миграций: `PRAGMA user_version` (8 = актуальная). Транзакции импорта — `BEGIN IMMEDIATE` (защита от гонки версий истории при параллельных импортах). Публичные GET-эндпоинты ограничены rate-limit'ом по IP (240 запросов/мин, файл под flock).
 
 ## Development Commands
 
@@ -165,10 +173,13 @@ php -S localhost:8000
 | `RuStore_logo.svg.png` | Логотип RuStore для лендинга |
 | `android-icon.png` | Иконка Android-робота в шапке (ссылка на android.html) |
 | `downloads/` | APK для лендинга (`schedule-<version>.apk`) |
+| `admin.php` | Админ-панель: импорт + управление источниками + ссылка на правки |
+| `admin_edit.php` | Страница правок расписания (редактор урока класса на дату) |
 | `api.php` | Единая точка входа для всех API-запросов |
 | `src/db.php` | Подключение к SQLite, миграции схемы |
 | `src/auth.php` | Авторизация ( session + password_hash ) |
 | `src/import.php` | Скачивание XLSX с Яндекс Диска, diff, сохранение |
+| `src/edits.php` | Правки расписания: наложение на чтение, CRUD |
 | `src/parser.php` | XLSX парсер без внешних зависимостей |
 | `app.js` | Вся клиентская логика (fetch, render, theme, localStorage) |
 | `style.css` | Вся стилистика (темы, адаптив, компоненты) |
