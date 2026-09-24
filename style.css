@@ -585,21 +585,7 @@ html:not([data-theme]) .theme-btn .icon-sun{display:inline}
 .install-card.primary .btn-download{background:var(--accent);color:#fff}
 .install-card.primary .btn-download:hover{background:var(--accent2)}
 
-.btn-store{
-  background:var(--surface2);color:var(--text);border-color:var(--border);
-  font-weight:500;
-}
-.btn-store[disabled]{
-  opacity:.6;cursor:not-allowed;filter:grayscale(1);
-}
 .store-logo{width:3rem;height:3rem;border-radius:.75rem;object-fit:cover}
-.install-card.disabled .store-logo{filter:grayscale(1);opacity:.6}
-.soon-badge{
-  display:inline-block;background:var(--surface2);color:var(--text3);
-  border:1px solid var(--border);border-radius:2rem;
-  font-size:.66rem;font-weight:600;padding:.15rem .5rem;
-  text-transform:uppercase;letter-spacing:.04em;line-height:1.4;
-}
 
 .install-steps{margin:.25rem 0 0 1.1rem;display:flex;flex-direction:column;gap:.35rem;font-size:.82rem;line-height:1.5;color:var(--text2)}
 .install-steps em{font-style:normal;color:var(--text)}
