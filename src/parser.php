@@ -154,6 +154,11 @@ function parse_sheet(string $xml_data, array $strings, string $sheet_name): arra
                     $idx = (int)$v;
                     $v = $strings[$idx] ?? '';
                 }
+            } elseif ($type === 'inlineStr') {
+                // Инлайн-строки (<is><t>…</t></is>): один файл может смешивать
+                // способы хранения (часть ячеек — shared strings, часть inline).
+                // Без этого ветки такие ячейки читались как пустые и терялись.
+                $v = get_text($xpath, $c);
             }
             $cells[$col_idx] = $v;
         }

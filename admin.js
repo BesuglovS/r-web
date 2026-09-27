@@ -110,11 +110,21 @@ document.addEventListener('submit', function(e) {
         }
         return;
     }
-    // Кнопка «Импортировать все»: блокируем повторный сабмит (был inline onclick)
-    var btn = f.querySelector && f.querySelector('button[name="import_all"]');
+    // Кнопки импорта/архивации: блокируем повторный сабмит
+    var btn = f.querySelector && f.querySelector('button[name="import_last"]');
     if (btn) {
         btn.disabled = true;
         btn.textContent = 'Импорт...';
+    }
+    var archBtn = f.querySelector && f.querySelector('button[name="archive_all"]');
+    if (archBtn) {
+        archBtn.disabled = true;
+        archBtn.textContent = 'Скачивание...';
+    }
+    var fillBtn = f.querySelector && f.querySelector('button[name="archive_backfill"]');
+    if (fillBtn) {
+        fillBtn.disabled = true;
+        fillBtn.textContent = 'Заполнение...';
     }
 });
 

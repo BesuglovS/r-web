@@ -189,6 +189,27 @@ $ws = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 check('день блока = день листа → урок импортирован', count(parse_sheet($ws, $strings2, 'ПН 22.09')) === 1);
 check('день блока ≠ день листа → блок пропущен', count(parse_sheet($ws, $strings2, 'ВТ 23.09')) === 0);
 
+/* ── parse_sheet: инлайн-строки (<is><t>), а не только shared strings ── */
+echo "parse_sheet (inline strings):\n";
+$inline = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    . '<worksheet xmlns="' . NS_MAIN . '"><sheetData>'
+    . '<row r="1">'
+    . '<c r="A1" t="inlineStr"><is><t>ПОНЕДЕЛЬНИК</t></is></c>'
+    . '<c r="C1" t="inlineStr"><is><t>5А</t></is></c>'
+    . '</row>'
+    . '<row r="2">'
+    . '<c r="A2" t="inlineStr"><is><t>9:00-10:45</t></is></c>'
+    . '<c r="B2" t="n"><v>1</v></c>'
+    . '<c r="C2" t="inlineStr"><is><t>Математика/Иванова (204)</t></is></c>'
+    . '</row>'
+    . '</sheetData></worksheet>';
+$lessonsInline = parse_sheet($inline, [], 'ПН 02.09');
+check('инлайн-строки: урок распознан', count($lessonsInline) === 1);
+check('инлайн-строки: предмет/учитель/кабинет',
+    ($lessonsInline[0]['subject'] ?? '') === 'Математика'
+    && ($lessonsInline[0]['teacher'] ?? '') === 'Иванова'
+    && ($lessonsInline[0]['room'] ?? '') === '204');
+
 /* ── Вспомогательные функции импорта ── */
 echo "import helpers:\n";
 check('SSRF: злой суффикс-хост отвергнут', !is_allowed_download_host('https://evil-yandex.attacker.com/f'));

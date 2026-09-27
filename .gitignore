@@ -1,4 +1,5 @@
 .git/
 /db/
+/archive/
 /php-server.log 
 /php-server.log 

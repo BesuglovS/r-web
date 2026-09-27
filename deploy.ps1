@@ -65,17 +65,18 @@ if ($identityFile -and (Test-Path $identityFile)) {
   icacls $identityFullPath /grant "${env:USERNAME}:(R)" 2>$null
 }
 
-# --- 2. Ensure remote db directory exists ---
+# --- 2. Ensure remote db/archive directories exist (outside docroot) ---
 $remoteDbPath = $remotePath -replace '/public/?$', '/db'
+$remoteArchivePath = $remotePath -replace '/public/?$', '/archive'
 $siteUrl = [Environment]::GetEnvironmentVariable('SITE_URL')
 
 if (-not $DryRun) {
-  Write-Host "`n==> Ensuring remote db directory exists ..." -ForegroundColor Cyan
+  Write-Host "`n==> Ensuring remote db/archive directories exist ..." -ForegroundColor Cyan
   $mkdirArgs = @()
   if ($sshPort -ne '22') { $mkdirArgs += "-P $sshPort" }
   if ($identityFile) { $mkdirArgs += "-i"; $mkdirArgs += $identityFile }
   $mkdirArgs += $remote
-  $mkdirArgs += "mkdir -p $remoteDbPath && chown www-data:www-data $remoteDbPath && chmod 775 $remoteDbPath"
+  $mkdirArgs += "mkdir -p $remoteDbPath $remoteArchivePath && chown www-data:www-data $remoteDbPath $remoteArchivePath && chmod 775 $remoteDbPath $remoteArchivePath"
   & ssh @mkdirArgs
 }
 
@@ -101,7 +102,7 @@ if ($DryRun) {
 
   $targz = Join-Path $env:TEMP "deploy-$(Get-Random).tar.gz"
   try {
-    & tar -czf $targz -C $PSScriptRoot --exclude '.git' --exclude 'node_modules' --exclude '*.tar.gz' --exclude '.env' --exclude 'deploy.ps1' --exclude 'AGENTS.MD' --exclude 'link.txt' --exclude 'r.nayanovaacademy.ru' --exclude 'fi.jpeg' .
+    & tar -czf $targz -C $PSScriptRoot --exclude '.git' --exclude 'node_modules' --exclude '*.tar.gz' --exclude '.env' --exclude 'deploy.ps1' --exclude 'AGENTS.MD' --exclude 'link.txt' --exclude 'r.nayanovaacademy.ru' --exclude 'fi.jpeg' --exclude 'archive' .
     if ($LASTEXITCODE -ne 0) {
       Write-Host "  Archive creation failed" -ForegroundColor Red
       exit 1

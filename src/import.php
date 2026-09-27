@@ -502,6 +502,21 @@ function do_import(string $public_url, ?PDO $existing_pdo = null): array
                 }
             }
 
+            // БД-архив: полная замена уроков этой недели (источник статистики
+            // педагогов). Пишется в той же транзакции, поэтому откат импорта
+            // откатывает и архив. XLSX-файл в каталоге архива — резерв.
+            if (!empty($new_lessons)) {
+                $src_id = 0;
+                try {
+                    $q = $pdo->prepare("SELECT id FROM schedule_sources WHERE url = ?");
+                    $q->execute([$public_url]);
+                    $src_id = (int)($q->fetchColumn() ?: 0);
+                } catch (Exception $ignored) {
+                    // источника нет — неделя идентифицируется диапазоном дат
+                }
+                archive_lessons($pdo, $src_id, archive_week_key($src_id, $date_list), $new_lessons, $imported_at);
+            }
+
             // Log import (переводим в статус no_changes, если данные не изменились)
             $log_stmt = $pdo->prepare("
                 INSERT INTO import_log (url, filename, imported_at, lessons_count, status)
@@ -652,10 +667,30 @@ function toggle_source(int $id): array
     }
     init_db($pdo);
 
+    $src = null;
+    foreach (get_sources($pdo) as $s) {
+        if ((int)$s['id'] === $id) {
+            $src = $s;
+            break;
+        }
+    }
+    if ($src === null) {
+        throw new RuntimeException('Источник не найден');
+    }
+
+    $is_active = (int)$src['is_active'] === 1;
+
+    // Перед выключением активного источника обязательно сохраняем его файл
+    // в архив: после выключения обновления файл может исчезнуть с
+    // Яндекс.Диска. При ошибке скачивания источник не выключается.
+    if ($is_active) {
+        archive_source_file($src, $pdo);
+    }
+
     $stmt = $pdo->prepare("UPDATE schedule_sources SET is_active = NOT is_active WHERE id = ?");
     $stmt->execute([$id]);
 
-    return ['status' => 'ok', 'toggled' => $stmt->rowCount()];
+    return ['status' => 'ok', 'toggled' => $stmt->rowCount(), 'now_active' => !$is_active];
 }
 
 function update_source_status(int $id, string $status, string $error = '', ?PDO $existing_pdo = null): void
@@ -687,6 +722,347 @@ function update_source_dates(PDO $pdo, int $id, array $dates): void
     } catch (Exception $e) {
         // не должно ломать импорт
     }
+}
+
+/**
+ * Каталог архивного хранения исходных XLSX. Приоритет:
+ *  1) переменная окружения SCHEDULE_ARCHIVE_DIR (или из .env);
+ *  2) <корень сайта>/archive/ (прод: на уровень выше public/, вне docroot);
+ *  3) <проект>/archive/ (локальная разработка).
+ */
+function get_archive_dir(): string
+{
+    $env = getenv('SCHEDULE_ARCHIVE_DIR');
+    if ($env === false || $env === '') {
+        $env = load_env_value('SCHEDULE_ARCHIVE_DIR') ?? '';
+    }
+    if ($env !== '') {
+        $dir = rtrim($env, "/\\");
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+        return $dir;
+    }
+
+    // Прод: каталог рядом с docroot (создаёт deploy.ps1) — вне доступа из веба
+    $site = dirname(__DIR__, 2) . '/archive';
+    if (is_dir($site)) {
+        return $site;
+    }
+
+    // Fallback для локальной разработки
+    $fallback = dirname(__DIR__) . '/archive';
+    @mkdir($fallback, 0775, true);
+    return $fallback;
+}
+
+/**
+ * Ключ уже сохранённого архива источника (префикс "<id>_" в имени файла).
+ * У одного источника (одной недели) в архиве может быть только один файл.
+ */
+function archive_exists(string $dir, int $id): ?string
+{
+    $found = glob($dir . '/' . $id . '_*.xlsx');
+    return !empty($found) ? $found[0] : null;
+}
+
+/**
+ * Скачивает XLSX источника в каталог архивного хранения.
+ * Имя файла: "<id>_<описание>_<даты>.xlsx".
+ *
+ * Для одного источника (одной недели) хранится РОВНО ОДИН архив — самый
+ * последний: если файл на Диске изменился, старый архив заменяется новым
+ * (прежние файлы этого id удаляются). Неизменённый файл не перекачивается
+ * (сверка md5 через лёгкий запрос метаданных).
+ *
+ * Бросает RuntimeException при неудачном скачивании (архив обязателен перед
+ * выключением источника).
+ */
+function archive_source_file(array $source, ?PDO $existing_pdo = null): array
+{
+    $pdo = $existing_pdo ?? get_db();
+    if ($pdo === null) {
+        throw new RuntimeException('БД недоступна');
+    }
+    init_db($pdo);
+
+    $id = (int)$source['id'];
+    $url = (string)$source['url'];
+    $label = trim((string)($source['label'] ?? ''));
+
+    $dir = get_archive_dir();
+    if (!is_dir($dir)) {
+        throw new RuntimeException('Не удалось создать каталог архива: ' . $dir);
+    }
+
+    $existing = archive_exists($dir, $id);
+
+    if (!is_valid_yandex_url($url)) {
+        throw new RuntimeException('Поддерживаются только ссылки на Яндекс.Диск (disk.yandex.ru, yadi.sk)');
+    }
+
+    // Если архив уже есть — качаем заново только при изменении файла на Диске.
+    // Лёгкая проверка метаданных экономит трафик; при недоступности метаданных
+    // оставляем имеющийся архив (в т.ч. чтобы не блокировать выключение источника).
+    if ($existing !== null) {
+        try {
+            $meta = get_public_meta($url);
+            $existing_md5 = (string)@md5_file($existing);
+            if ($meta['md5'] !== '' && $existing_md5 !== '' && $meta['md5'] === $existing_md5) {
+                return ['status' => 'skipped', 'path' => $existing];
+            }
+        } catch (Exception $e) {
+            return ['status' => 'skipped', 'path' => $existing];
+        }
+    }
+
+    $tmp = tempnam(sys_get_temp_dir(), 'archive_');
+    if ($tmp === false) {
+        throw new RuntimeException('Не удалось создать временный файл');
+    }
+
+    try {
+        $download_url = get_yandex_download_url($url);
+        download_file($download_url, $tmp);
+
+        // Даты для имени берём из содержимого файла; при ошибке разбора —
+        // из last_dates источника. Архивация важнее красивых метаданных,
+        // поэтому провал парсинга не прерывает сохранение.
+        $dates = [];
+        try {
+            foreach (parse_xlsx($tmp) as $lesson) {
+                $d = parse_sheet_date((string)$lesson['sheet_name'])['date'];
+                if ($d !== '') {
+                    $dates[$d] = true;
+                }
+            }
+        } catch (Exception $e) {
+            // ignore — имя соберём из last_dates или 'unknown'
+        }
+        if (empty($dates)) {
+            $stored = json_decode((string)($source['last_dates'] ?? '[]'), true);
+            if (is_array($stored)) {
+                foreach ($stored as $d) {
+                    if ((string)$d !== '') {
+                        $dates[(string)$d] = true;
+                    }
+                }
+            }
+        }
+
+        $dates = array_keys($dates);
+        sort($dates);
+        $date_part = empty($dates)
+            ? 'unknown'
+            : ($dates[0] . (count($dates) > 1 ? '_' . $dates[count($dates) - 1] : ''));
+
+        $safe_label = trim((string)preg_replace('/[^\p{L}\p{N}]+/u', '-', $label), '-');
+        if ($safe_label === '') {
+            $safe_label = 'schedule';
+        }
+
+        $target = $dir . '/' . $id . '_' . $safe_label . '_' . $date_part . '.xlsx';
+
+        // Сохраняем новую версию, НЕ удаляя старую заранее: если запись не
+        // удалась, прежний архив остаётся на месте. rename на Windows не
+        // перезаписывает существующую цель — тогда используем copy (перезапись).
+        if (!@rename($tmp, $target)) {
+            if (!@copy($tmp, $target)) {
+                throw new RuntimeException('Не удалось сохранить архив: ' . $target);
+            }
+            @unlink($tmp);
+        }
+
+        // Только после успешной записи новой версии удаляем прежние файлы
+        // этого источника с другими именами — остаётся ровно один, свежий
+        foreach (glob($dir . '/' . $id . '_*.xlsx') ?: [] as $old) {
+            if ($old !== $target) {
+                @unlink($old);
+            }
+        }
+
+        return ['status' => 'ok', 'path' => $target];
+    } finally {
+        if (file_exists($tmp)) {
+            @unlink($tmp);
+        }
+    }
+}
+
+/**
+ * Скачивает в архив все источники (включая выключенные). У каждого источника
+ * хранится один последний архив; неизменённые файлы не перекачиваются.
+ */
+function archive_all_sources(): array
+{
+    $pdo = get_db();
+    if ($pdo === null) {
+        throw new RuntimeException('БД недоступна');
+    }
+    init_db($pdo);
+
+    $sources = get_sources($pdo);
+    $saved = 0;
+    $skipped = 0;
+    $errors = [];
+
+    foreach ($sources as $src) {
+        try {
+            $result = archive_source_file($src, $pdo);
+            if (($result['status'] ?? '') === 'skipped') {
+                $skipped++;
+            } else {
+                $saved++;
+            }
+        } catch (Exception $e) {
+            $errors[] = [
+                'id'    => (int)$src['id'],
+                'label' => (string)($src['label'] ?? ''),
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    return [
+        'total'   => count($sources),
+        'saved'   => $saved,
+        'skipped' => $skipped,
+        'errors'  => $errors,
+    ];
+}
+
+/**
+ * Ключ архивной недели: по источнику ('s<id>') либо по диапазону дат для
+ * ad-hoc импорта без источника ('d_<первая>_<последняя>').
+ */
+function archive_week_key(int $source_id, array $dates): string
+{
+    if ($source_id > 0) {
+        return 's' . $source_id;
+    }
+    $dates = array_values(array_filter(array_unique($dates)));
+    sort($dates);
+    $first = $dates[0] ?? 'unknown';
+    $last = $dates[count($dates) - 1] ?? 'unknown';
+    return 'd_' . $first . '_' . $last;
+}
+
+/**
+ * Полностью заменяет БД-архив одной недели (week_key) уроками источника.
+ * $lessons — строки с полями date, day_of_week, class_name, lesson_num,
+ * time_start, time_end, subject, teacher, room, parallel_group.
+ * Возвращает количество записанных уроков.
+ */
+function archive_lessons(PDO $pdo, int $source_id, string $week_key, array $lessons, string $archived_at): int
+{
+    $pdo->prepare("DELETE FROM schedule_archive WHERE week_key = ?")->execute([$week_key]);
+    if (empty($lessons)) {
+        return 0;
+    }
+
+    $stmt = $pdo->prepare("
+        INSERT INTO schedule_archive
+            (source_id, week_key, date, day_of_week, class_name, lesson_num,
+             time_start, time_end, subject, teacher, room, parallel_group, archived_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ");
+
+    $n = 0;
+    foreach ($lessons as $l) {
+        $stmt->execute([
+            $source_id,
+            $week_key,
+            (string)$l['date'],
+            (string)$l['day_of_week'],
+            (string)$l['class_name'],
+            (int)$l['lesson_num'],
+            (string)$l['time_start'],
+            (string)$l['time_end'],
+            (string)$l['subject'],
+            (string)$l['teacher'],
+            (string)($l['room'] ?? ''),
+            (string)($l['parallel_group'] ?? ''),
+            $archived_at,
+        ]);
+        $n++;
+    }
+    return $n;
+}
+
+/**
+ * Первичное наполнение schedule_archive из файлов архива (XLSX) — для недель,
+ * импортированных до появления БД-архива. Файл резерва остаётся на месте.
+ */
+function backfill_archive_from_files(?PDO $existing_pdo = null): array
+{
+    $pdo = $existing_pdo ?? get_db();
+    if ($pdo === null) {
+        throw new RuntimeException('БД недоступна');
+    }
+    init_db($pdo);
+
+    $dir = get_archive_dir();
+    $files = glob($dir . '/*.xlsx') ?: [];
+    usort($files, static function (string $a, string $b): int {
+        $pa = preg_match('/^(\d+)_/', basename($a), $ma) ? (int)$ma[1] : PHP_INT_MAX;
+        $pb = preg_match('/^(\d+)_/', basename($b), $mb) ? (int)$mb[1] : PHP_INT_MAX;
+        return $pa <=> $pb ?: strcmp(basename($a), basename($b));
+    });
+
+    $weeks = 0;
+    $lessons_count = 0;
+    $errors = [];
+    $archived_at = gmdate('Y-m-d H:i:s');
+
+    foreach ($files as $file) {
+        $base = basename($file);
+        $source_id = preg_match('/^(\d+)_/', $base, $m) ? (int)$m[1] : 0;
+
+        try {
+            $parsed = parse_xlsx($file);
+        } catch (Exception $e) {
+            $errors[] = ['file' => $base, 'error' => $e->getMessage()];
+            continue;
+        }
+
+        $dates = [];
+        $rows = [];
+        foreach ($parsed as $l) {
+            $di = parse_sheet_date((string)($l['sheet_name'] ?? ''));
+            if (($di['date'] ?? '') === '') {
+                continue;
+            }
+            $dates[$di['date']] = true;
+            $rows[] = [
+                'date'           => $di['date'],
+                'day_of_week'    => $di['day_of_week'],
+                'class_name'     => $l['class_name'],
+                'lesson_num'     => $l['lesson_num'],
+                'time_start'     => $l['time_start'],
+                'time_end'       => $l['time_end'],
+                'subject'        => $l['subject'],
+                'teacher'        => $l['teacher'],
+                'room'           => $l['room'],
+                'parallel_group' => $l['parallel_group'],
+            ];
+        }
+
+        if (empty($rows)) {
+            continue;
+        }
+
+        $week_key = archive_week_key($source_id, array_keys($dates));
+        archive_lessons($pdo, $source_id, $week_key, $rows, $archived_at);
+        $weeks++;
+        $lessons_count += count($rows);
+    }
+
+    return [
+        'files'   => count($files),
+        'weeks'   => $weeks,
+        'lessons' => $lessons_count,
+        'errors'  => $errors,
+    ];
 }
 
 function do_import_all(): array
@@ -743,6 +1119,59 @@ function do_import_all(): array
         'last_error' => $errors ? $errors[count($errors) - 1] : null,
         'cleanup' => $cleanup,
     ];
+}
+
+/**
+ * Импорт только последнего (самого нового по id) активного источника.
+ * Автоочистку дат не выполняет: она требует полного импорта всех источников.
+ */
+function do_import_last(): array
+{
+    $pdo = get_db();
+    if ($pdo === null) {
+        throw new RuntimeException('БД недоступна');
+    }
+    init_db($pdo);
+
+    $sources = get_sources($pdo);
+    $active = array_values(array_filter($sources, fn($s) => (int)$s['is_active'] === 1));
+
+    if (empty($active)) {
+        throw new RuntimeException('Нет активных источников');
+    }
+
+    $source = $active[count($active) - 1];
+    $id = (int)$source['id'];
+    $url = $source['url'];
+
+    try {
+        $result = do_import($url, $pdo);
+        update_source_status($id, $result['status'] ?? 'ok', '', $pdo);
+        update_source_dates($pdo, $id, $result['dates'] ?? []);
+
+        return [
+            'total'   => 1,
+            'success' => 1,
+            'errors'  => 0,
+            'results' => [['id' => $id, 'url' => $url, 'result' => $result]],
+            'error_details' => [],
+            'last_error' => null,
+            'cleanup' => ['removed_dates' => [], 'lessons' => 0],
+        ];
+    } catch (Exception $e) {
+        update_source_status($id, 'error', $e->getMessage(), $pdo);
+        $errors = [['id' => $id, 'url' => $url, 'error' => $e->getMessage()]];
+
+        return [
+            'total'   => 1,
+            'success' => 0,
+            'errors'  => 1,
+            'results' => [['id' => $id, 'url' => $url, 'error' => $e->getMessage()]],
+            'error_details' => $errors,
+            'last_error' => $errors[0],
+            'cleanup' => ['removed_dates' => [], 'lessons' => 0],
+        ];
+    }
 }
 
 /**

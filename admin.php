@@ -70,9 +70,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
     } elseif (isset($_POST['toggle_source'])) {
         $id = (int)($_POST['source_id'] ?? 0);
         try {
-            toggle_source($id);
-            $message = 'Статус источника обновлён';
+            $result = toggle_source($id);
+            $message = empty($result['now_active'])
+                ? 'Источник выключен (файл сохранён в архив)'
+                : 'Источник включён';
             $message_type = 'success';
+        } catch (Exception $e) {
+            $message = 'Ошибка: ' . $e->getMessage();
+            $message_type = 'error';
+        }
+    } elseif (isset($_POST['archive_all'])) {
+        try {
+            $result = archive_all_sources();
+            $saved = (int)($result['saved'] ?? 0);
+            $skipped = (int)($result['skipped'] ?? 0);
+            $errors = $result['errors'] ?? [];
+            $message = "Архивация: сохранено {$saved}, уже в архиве {$skipped}";
+            if (!empty($errors)) {
+                $detail = [];
+                foreach ($errors as $err) {
+                    $name = trim((string)$err['label']) !== '' ? $err['label'] : ('#' . $err['id']);
+                    $detail[] = "{$name}: {$err['error']}";
+                }
+                $message .= '. Ошибки — ' . implode('; ', $detail);
+                $message_type = 'error';
+            } else {
+                $message_type = 'success';
+            }
+        } catch (Exception $e) {
+            $message = 'Ошибка: ' . $e->getMessage();
+            $message_type = 'error';
+        }
+    } elseif (isset($_POST['archive_backfill'])) {
+        try {
+            $result = backfill_archive_from_files();
+            $weeks = (int)($result['weeks'] ?? 0);
+            $lessons = (int)($result['lessons'] ?? 0);
+            $errors = $result['errors'] ?? [];
+            $message = "Архив в БД заполнен: недель {$weeks}, уроков {$lessons}";
+            if (!empty($errors)) {
+                $detail = [];
+                foreach ($errors as $err) {
+                    $detail[] = ($err['file'] ?? '?') . ': ' . ($err['error'] ?? '');
+                }
+                $message .= '. Ошибки — ' . implode('; ', $detail);
+                $message_type = 'error';
+            } else {
+                $message_type = 'success';
+            }
         } catch (Exception $e) {
             $message = 'Ошибка: ' . $e->getMessage();
             $message_type = 'error';
@@ -94,9 +139,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
                 $message_type = 'error';
             }
         }
-    } elseif (isset($_POST['import_all'])) {
+    } elseif (isset($_POST['import_last'])) {
         try {
-            $result = do_import_all();
+            $result = do_import_last();
             $total = (int)($result['total'] ?? 0);
             $success = (int)($result['success'] ?? 0);
             $errors = (int)($result['errors'] ?? 0);
@@ -404,6 +449,7 @@ foreach ($log as $entry) {
             <h1>Импорт расписания</h1>
             <div class="top-bar-links">
                 <a href="admin_edit.php">Правки расписания</a>
+                <a href="admin_stats.php">Статистика</a>
                 <a href="?logout">Выйти</a>
             </div>
         </div>
@@ -528,10 +574,34 @@ foreach ($log as $entry) {
 
             <form method="POST">
                 <?= csrf_field() ?>
-                <button type="submit" name="import_all" value="1" class="btn-import-all">
-                    Импортировать последние 2 источника
+                <button type="submit" name="import_last" value="1" class="btn-import-all">
+                    Импортировать последнее расписание
                 </button>
             </form>
+
+            <form method="POST" style="margin-top:.75rem;">
+                <?= csrf_field() ?>
+                <button type="submit" name="archive_all" value="1" class="btn-import-all">
+                    Скачать все недели в архив
+                </button>
+            </form>
+            <p class="hint" style="margin:.5rem 0 0;">
+                Скачивает исходные XLSX всех источников (включая выключенные) в архив
+                на сервере. Неизменённые недели не перекачиваются; хранится только
+                последняя версия недели.
+            </p>
+
+            <form method="POST" style="margin-top:.75rem;">
+                <?= csrf_field() ?>
+                <button type="submit" name="archive_backfill" value="1" class="btn-import-all">
+                    Заполнить архив в БД из файлов
+                </button>
+            </form>
+            <p class="hint" style="margin:.5rem 0 0;">
+                Переносит уроки из XLSX-файлов архива в БД (таблица <code>schedule_archive</code>) —
+                статистика педагогов считается из БД. Нужно один раз для старых недель;
+                новые импорты пишутся в БД автоматически.
+            </p>
         </div>
 
         <div class="card">
@@ -541,6 +611,15 @@ foreach ($log as $entry) {
                 и скрытие уроков). Применяются автоматически и не затираются при импорте.
             </p>
             <a class="link-button" href="admin_edit.php">Открыть страницу правок →</a>
+        </div>
+
+        <div class="card">
+            <h2>Статистика педагогов</h2>
+            <p class="hint" style="margin:0 0 1rem;">
+                Количество уроков педагогов по неделям из БД-архива расписания,
+                с разбивкой по неделям и итогами.
+            </p>
+            <a class="link-button" href="admin_stats.php">Открыть статистику →</a>
         </div>
 
         <div class="card">

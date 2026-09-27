@@ -128,8 +128,10 @@ function init_db(PDO $pdo): void
     //     Старые room_corrections переносятся в schedule_edits и больше не используются.
     // 8 = + base_parallel_group в ключе schedule_edits (правки параллельных групп
     //     раздельно); существующие правки размножаются по группам.
+    // 9 = + таблица schedule_archive (полные уроки по неделям из архива; источник
+    //     статистики педагогов; заполняется при импорте и бэкфиллом из файлов).
     $ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-    if ($ver >= 8) {
+    if ($ver >= 9) {
         $inited[$key] = true;
         return;
     }
@@ -231,10 +233,11 @@ function init_db(PDO $pdo): void
 
     migrate_schedule_edits($pdo);
     migrate_edits_parallel_group($pdo);
+    migrate_schedule_archive($pdo);
 
     // Поднять версию схемы (после UTC-миграции, чтобы она успела отработать на старых БД)
-    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 8) {
-        $pdo->exec('PRAGMA user_version = 8');
+    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 9) {
+        $pdo->exec('PRAGMA user_version = 9');
     }
 
     $inited[$key] = true;
@@ -467,6 +470,42 @@ function migrate_edits_parallel_group(PDO $pdo): void
             ]);
         }
     }
+}
+
+/**
+ * БД-архив полного расписания по неделям (миграция v9).
+ *
+ * Одна строка — один урок архивной недели. Источник статистики педагогов
+ * (src/stats.php): считается через SQL, без парсинга файлов. XLSX-файлы
+ * в каталоге архива остаются резервом для восстановления этой таблицы.
+ *
+ * week_key — идентификатор недели: 's<source_id>' для источника либо
+ * 'd_<первая_дата>_<последняя_дата>' для ad-hoc импорта без источника.
+ */
+function migrate_schedule_archive(PDO $pdo): void
+{
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS schedule_archive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL DEFAULT 0,
+            week_key TEXT NOT NULL,
+            date TEXT NOT NULL,
+            day_of_week TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            lesson_num INTEGER NOT NULL,
+            time_start TEXT NOT NULL,
+            time_end TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            teacher TEXT NOT NULL,
+            room TEXT DEFAULT '',
+            parallel_group TEXT,
+            archived_at TEXT NOT NULL
+        )
+    ");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_archive_week ON schedule_archive(week_key)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_archive_source ON schedule_archive(source_id)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_archive_teacher ON schedule_archive(teacher)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_archive_date ON schedule_archive(date)");
 }
 
 /**

@@ -26,6 +26,8 @@ echo "backup #1: " . ($b ?: 'НЕТ') . "\n";
 $b2 = backup_db($pdo);
 echo "backup #2 (тот же файл за день): " . ($b2 ?: 'НЕТ') . "\n";
 echo "user_version: " . $pdo->query('PRAGMA user_version')->fetchColumn() . "\n";
+$arch = (int)$pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schedule_archive'")->fetchColumn();
+echo "schedule_archive table: " . ($arch ? 'есть' : 'НЕТ') . "\n";
 
 // Проверка целостности бэкапа
 $check = new PDO('sqlite:' . $b);
