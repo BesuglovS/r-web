@@ -12,6 +12,7 @@ $message = '';
 $message_type = '';
 
 require_once __DIR__ . '/src/import.php';
+require_once __DIR__ . '/src/tarification.php';
 
 // utc_to_samara() теперь в src/db.php: хранит UTC, отображает самарское время
 
@@ -97,6 +98,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
             } else {
                 $message_type = 'success';
             }
+        } catch (Exception $e) {
+            $message = 'Ошибка: ' . $e->getMessage();
+            $message_type = 'error';
+        }
+    } elseif (isset($_POST['tarif_import'])) {
+        try {
+            $file = $_FILES['tarif_file'] ?? null;
+            if (!is_array($file) || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+                throw new Exception('Файл не загружен');
+            }
+            if (($file['size'] ?? 0) > 20 * 1024 * 1024) {
+                throw new Exception('Файл слишком большой (лимит 20 МБ)');
+            }
+            $ext = strtolower(pathinfo((string)$file['name'], PATHINFO_EXTENSION));
+            if (!in_array($ext, ['xlsx', 'xlsm'], true)) {
+                throw new Exception('Ожидается файл .xlsx или .xlsm');
+            }
+            $res = import_tarification_from_file($file['tmp_name']);
+            $message = "Тарификация загружена: строк {$res['rows']}, педагогов {$res['teachers']}, предметов {$res['subjects']}";
+            $message_type = 'success';
         } catch (Exception $e) {
             $message = 'Ошибка: ' . $e->getMessage();
             $message_type = 'error';
@@ -620,6 +641,23 @@ foreach ($log as $entry) {
                 с разбивкой по неделям и итогами.
             </p>
             <a class="link-button" href="admin_stats.php">Открыть статистику →</a>
+            <a class="link-button" href="admin_stats_unmatched.php" style="margin-left:.5rem;">Расхождения с тарификацией →</a>
+        </div>
+
+        <div class="card">
+            <h2>Тарификация</h2>
+            <p class="hint" style="margin:0 0 1rem;">
+                Нужное число часов по предметам у педагогов. Загрузите файл .xlsx/.xlsm
+                с листом «Тарификация» (столбцы: ФИО учителя, Предмет, Класс, Часы).
+                Часы показываются на странице педагога в статистике.
+            </p>
+            <form method="POST" enctype="multipart/form-data">
+                <?= csrf_field() ?>
+                <input type="file" name="tarif_file" accept=".xlsx,.xlsm" required>
+                <button type="submit" name="tarif_import" value="1" class="btn-import-all">
+                    Загрузить тарификацию
+                </button>
+            </form>
         </div>
 
         <div class="card">

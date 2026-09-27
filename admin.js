@@ -126,6 +126,11 @@ document.addEventListener('submit', function(e) {
         fillBtn.disabled = true;
         fillBtn.textContent = 'Заполнение...';
     }
+    var tarifBtn = f.querySelector && f.querySelector('button[name="tarif_import"]');
+    if (tarifBtn) {
+        tarifBtn.disabled = true;
+        tarifBtn.textContent = 'Загрузка...';
+    }
 });
 
 // Вкладки журналов: импорты / проверки (запоминаем выбор)

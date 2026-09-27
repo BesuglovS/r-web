@@ -14,18 +14,60 @@ require_admin();
 header('Cache-Control: no-store');
 
 require_once __DIR__ . '/src/stats.php';
+require_once __DIR__ . '/src/tarification.php';
 
 $stats = collect_teacher_stats();
+$tarification = collect_tarification();
 $teacher = trim((string)($_GET['teacher'] ?? ''));
 $found = $teacher !== '' && isset($stats['matrix'][$teacher]);
 
 $weeks = $stats['weeks'];
 $detail = $found ? ($stats['details'][$teacher] ?? []) : [];
+$tarifBySubject = $found ? ($tarification['by_subject'][$teacher] ?? []) : [];
+$tarifByClass = $found ? ($tarification['by_subject_class'][$teacher] ?? []) : [];
+$tarifTotal = $found ? (float)($tarification['total'][$teacher] ?? 0) : 0.0;
 
 /** Подпись группы: пустая = урок для всего класса. */
 function stats_group_label(string $group): string
 {
     return $group === '' ? 'весь класс' : ('группа ' . $group);
+}
+
+/** Часы тарификации: «26,5» / «0,25», пусто при нуле. */
+function stats_fmt_tarif(float $hours): string
+{
+    if ($hours <= 0) {
+        return '';
+    }
+    return rtrim(rtrim(number_format($hours, 2, ',', ' '), '0'), ',');
+}
+
+/**
+ * Часы тарификации по классу: точное совпадение, иначе сумма подгрупп
+ * (в тарификации класс может быть «7Г1», «7Г2», а в расписании — «7Г»).
+ */
+function stats_tarif_class(array $byClassForSubject, string $scheduleClass): float
+{
+    $key = tarification_class_key($scheduleClass);
+    if ($key === '') {
+        return 0.0;
+    }
+    if (isset($byClassForSubject[$key])) {
+        return (float)$byClassForSubject[$key];
+    }
+    $sum = 0.0;
+    $found = false;
+    $keyLen = strlen($key);
+    foreach ($byClassForSubject as $tarifClass => $hours) {
+        $tarifClass = (string)$tarifClass;
+        if ($tarifClass !== ''
+            && strncmp($tarifClass, $key, $keyLen) === 0
+            && preg_match('/^\d+$/', substr($tarifClass, $keyLen))) {
+            $sum += (float)$hours;
+            $found = true;
+        }
+    }
+    return $found ? $sum : 0.0;
 }
 
 // Предмет → класс → группа (суммарно по всем неделям)
@@ -131,7 +173,8 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
     foreach ($weeks as $w) {
         $head[] = $w['label'];
     }
-    $head[] = 'Итого';
+    $head[] = 'Итого уроков';
+    $head[] = 'Тариф., ч';
     fputcsv($out, array_map($csvCell, $head), ';', '"', '\\');
 
     foreach ($subjects as $subject) {
@@ -144,6 +187,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                 $row[] = (string)(int)($detail[$w['key']][$subject][$class][$group] ?? 0);
             }
             $row[] = (string)$subjectTotals[$subject];
+            $row[] = stats_fmt_tarif((float)($tarifBySubject[tarification_subject_key($subject)] ?? 0));
             fputcsv($out, array_map($csvCell, $row), ';', '"', '\\');
             continue;
         }
@@ -154,6 +198,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
             $row[] = (string)$subjectWeek($subject, $w['key']);
         }
         $row[] = (string)$subjectTotals[$subject];
+        $row[] = stats_fmt_tarif((float)($tarifBySubject[tarification_subject_key($subject)] ?? 0));
         fputcsv($out, array_map($csvCell, $row), ';', '"', '\\');
 
         foreach ($classes as $class => $groups) {
@@ -163,6 +208,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                     $row[] = (string)$classWeek($subject, $class, $w['key']);
                 }
                 $row[] = (string)$classTotal($subject, $class);
+                $row[] = stats_fmt_tarif(stats_tarif_class($tarifByClass[tarification_subject_key($subject)] ?? [], $class));
                 fputcsv($out, array_map($csvCell, $row), ';', '"', '\\');
             }
             if ($groupMeaningful($groups)) {
@@ -172,6 +218,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                         $row[] = (string)(int)($detail[$w['key']][$subject][$class][$group] ?? 0);
                     }
                     $row[] = (string)$groupTotal;
+                    $row[] = '';
                     fputcsv($out, array_map($csvCell, $row), ';', '"', '\\');
                 }
             }
@@ -183,6 +230,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
         $totalRow[] = (string)$weekTotals[$w['key']];
     }
     $totalRow[] = (string)$grandTotal;
+    $totalRow[] = stats_fmt_tarif($tarifTotal);
     fputcsv($out, array_map($csvCell, $totalRow), ';', '"', '\\');
     fclose($out);
     exit;
@@ -271,6 +319,8 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
         }
         tfoot th.subject { text-align: left; }
         td.total, th.total { color: #93c5fd; font-weight: 700; }
+        th.tarif-th { color: #f59e0b; }
+        td.tarif { color: #fcd34d; font-weight: 600; }
         .zero { color: #475569; }
 
         .hint { color: #64748b; font-size: .8rem; margin-top: .75rem; }
@@ -316,6 +366,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                     <div class="stat"><div class="val"><?= count($classSet) ?></div><div class="lbl">классов</div></div>
                     <div class="stat"><div class="val"><?= count($groupSet) ?></div><div class="lbl">групп (класс + подгруппа)</div></div>
                     <div class="stat"><div class="val"><?= count(array_filter($weekTotals, static fn($n) => $n > 0)) ?></div><div class="lbl">недель с уроками</div></div>
+                    <div class="stat"><div class="val"><?= stats_fmt_tarif($tarifTotal) !== '' ? htmlspecialchars(stats_fmt_tarif($tarifTotal)) : '—' ?></div><div class="lbl">часов по тарификации</div></div>
                 </div>
             </div>
 
@@ -335,7 +386,8 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                                     <?php foreach ($weeks as $w): ?>
                                         <th title="<?= htmlspecialchars($w['label']) ?>"><?= htmlspecialchars($w['label']) ?></th>
                                     <?php endforeach; ?>
-                                    <th>Итого</th>
+                                    <th>Итого уроков</th>
+                                    <th class="tarif-th" title="Нужное число часов по тарификации">Тариф., ч</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -348,9 +400,11 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                                             <td><?= $n > 0 ? (int)$n : '<span class="zero">—</span>' ?></td>
                                         <?php endforeach; ?>
                                         <td class="total"><?= (int)$subjectTotals[$subject] ?></td>
+                                        <td class="tarif"><?= stats_fmt_tarif((float)($tarifBySubject[tarification_subject_key($subject)] ?? 0)) !== '' ? htmlspecialchars(stats_fmt_tarif((float)($tarifBySubject[tarification_subject_key($subject)] ?? 0))) : '<span class="zero">—</span>' ?></td>
                                     </tr>
                                     <?php if ($hasBreakdown($classes)): ?>
                                         <?php foreach ($classes as $class => $groups): ?>
+                                            <?php $tarifClass = stats_tarif_class($tarifByClass[tarification_subject_key($subject)] ?? [], $class); ?>
                                             <tr class="class-row">
                                                 <th class="subject">↳ <?= htmlspecialchars($class) ?></th>
                                                 <?php foreach ($weeks as $w): ?>
@@ -358,6 +412,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                                                     <td><?= $n > 0 ? (int)$n : '<span class="zero">—</span>' ?></td>
                                                 <?php endforeach; ?>
                                                 <td><?= (int)$classTotal($subject, $class) ?></td>
+                                                <td class="tarif"><?= stats_fmt_tarif($tarifClass) !== '' ? htmlspecialchars(stats_fmt_tarif($tarifClass)) : '<span class="zero">—</span>' ?></td>
                                             </tr>
                                             <?php if ($groupMeaningful($groups)): ?>
                                                 <?php foreach ($groups as $group => $groupTotal): ?>
@@ -368,6 +423,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                                                             <td><?= $n > 0 ? (int)$n : '<span class="zero">—</span>' ?></td>
                                                         <?php endforeach; ?>
                                                         <td><?= (int)$groupTotal ?></td>
+                                                        <td class="tarif"><span class="zero">—</span></td>
                                                     </tr>
                                                 <?php endforeach; ?>
                                             <?php endif; ?>
@@ -382,11 +438,12 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv' && $found) {
                                         <td><?= (int)$weekTotals[$w['key']] ?></td>
                                     <?php endforeach; ?>
                                     <td class="total"><?= (int)$grandTotal ?></td>
+                                    <td class="tarif"><?= stats_fmt_tarif($tarifTotal) !== '' ? htmlspecialchars(stats_fmt_tarif($tarifTotal)) : '<span class="zero">—</span>' ?></td>
                                 </tr>
                             </tfoot>
                         </table>
                     </div>
-                    <p class="hint">Предмет — сумма по классам; класс — сумма по группам; ниже строки групп, если класс делится на подгруппы. «—» — уроков не было.</p>
+                    <p class="hint">Предмет — сумма по классам; класс — сумма по группам; ниже строки групп, если класс делится на подгруппы. «—» — уроков не было. Колонка «Тариф., ч» — нужное число часов из тарификации (по предмету и по классу).</p>
                 <?php endif; ?>
             </div>
         <?php endif; ?>

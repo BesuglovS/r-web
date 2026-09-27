@@ -3,3 +3,6 @@
 /archive/
 /php-server.log 
 /php-server.log 
+# Тарификация (личные данные) — не коммитим и не деплоим в docroot
+*.xlsm
+/Тарификация.xlsm

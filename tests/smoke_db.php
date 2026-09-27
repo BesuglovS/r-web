@@ -28,6 +28,8 @@ echo "backup #2 (тот же файл за день): " . ($b2 ?: 'НЕТ') . "\
 echo "user_version: " . $pdo->query('PRAGMA user_version')->fetchColumn() . "\n";
 $arch = (int)$pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schedule_archive'")->fetchColumn();
 echo "schedule_archive table: " . ($arch ? 'есть' : 'НЕТ') . "\n";
+$tarif = (int)$pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tarification'")->fetchColumn();
+echo "tarification table: " . ($tarif ? 'есть' : 'НЕТ') . "\n";
 
 // Проверка целостности бэкапа
 $check = new PDO('sqlite:' . $b);

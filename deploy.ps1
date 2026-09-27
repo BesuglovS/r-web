@@ -102,7 +102,7 @@ if ($DryRun) {
 
   $targz = Join-Path $env:TEMP "deploy-$(Get-Random).tar.gz"
   try {
-    & tar -czf $targz -C $PSScriptRoot --exclude '.git' --exclude 'node_modules' --exclude '*.tar.gz' --exclude '.env' --exclude 'deploy.ps1' --exclude 'AGENTS.MD' --exclude 'link.txt' --exclude 'r.nayanovaacademy.ru' --exclude 'fi.jpeg' --exclude 'archive' .
+    & tar -czf $targz -C $PSScriptRoot --exclude '.git' --exclude 'node_modules' --exclude '*.tar.gz' --exclude '.env' --exclude 'deploy.ps1' --exclude 'AGENTS.MD' --exclude 'link.txt' --exclude 'r.nayanovaacademy.ru' --exclude 'fi.jpeg' --exclude 'archive' --exclude '*.xlsm' --exclude '*.xlsx' .
     if ($LASTEXITCODE -ne 0) {
       Write-Host "  Archive creation failed" -ForegroundColor Red
       exit 1

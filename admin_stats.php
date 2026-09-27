@@ -173,6 +173,7 @@ $teachersCount = count($stats['matrix']);
             <h1>Статистика педагогов</h1>
             <div class="links">
                 <a href="admin.php">&larr; Импорт расписания</a>
+                <a href="admin_stats_unmatched.php">Расхождения с тарификацией</a>
                 <a href="admin_edit.php">Правки</a>
                 <a href="admin.php?logout">Выйти</a>
             </div>

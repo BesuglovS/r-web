@@ -130,8 +130,10 @@ function init_db(PDO $pdo): void
     //     раздельно); существующие правки размножаются по группам.
     // 9 = + таблица schedule_archive (полные уроки по неделям из архива; источник
     //     статистики педагогов; заполняется при импорте и бэкфиллом из файлов).
+    // 10 = + таблица tarification (нужное число часов по предметам у педагогов из
+    //     файла «Тарификация»; показывается на странице педагога).
     $ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-    if ($ver >= 9) {
+    if ($ver >= 10) {
         $inited[$key] = true;
         return;
     }
@@ -234,10 +236,11 @@ function init_db(PDO $pdo): void
     migrate_schedule_edits($pdo);
     migrate_edits_parallel_group($pdo);
     migrate_schedule_archive($pdo);
+    migrate_tarification($pdo);
 
     // Поднять версию схемы (после UTC-миграции, чтобы она успела отработать на старых БД)
-    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 9) {
-        $pdo->exec('PRAGMA user_version = 9');
+    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 10) {
+        $pdo->exec('PRAGMA user_version = 10');
     }
 
     $inited[$key] = true;
@@ -506,6 +509,35 @@ function migrate_schedule_archive(PDO $pdo): void
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_archive_source ON schedule_archive(source_id)");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_archive_teacher ON schedule_archive(teacher)");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_archive_date ON schedule_archive(date)");
+}
+
+/**
+ * Тарификация (миграция v10): нужное число часов по предметам у педагогов.
+ *
+ * Одна строка = предмет+класс+часы одного педагога из файла «Тарификация»
+ * (лист «Тарификация»). Заполняется импортом файла (src/tarification.php),
+ * читается страницей педагога. `teacher` — короткое ФИО (Фамилия И.О.), как
+ * в расписании; `class_name` — класс без пробелов (10Б), для сопоставления.
+ */
+function migrate_tarification(PDO $pdo): void
+{
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS tarification (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher TEXT NOT NULL DEFAULT '',
+            teacher_full TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            class_name TEXT NOT NULL DEFAULT '',
+            class_raw TEXT NOT NULL DEFAULT '',
+            hours REAL NOT NULL DEFAULT 0,
+            department TEXT NOT NULL DEFAULT '',
+            funding TEXT NOT NULL DEFAULT '',
+            imported_at TEXT NOT NULL
+        )
+    ");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tarif_teacher ON tarification(teacher)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tarif_teacher_subject ON tarification(teacher, subject)");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tarif_subject_class ON tarification(subject, class_name)");
 }
 
 /**

@@ -19,6 +19,7 @@ require_once __DIR__ . '/../src/db.php';
 require_once __DIR__ . '/../src/parser.php';
 require_once __DIR__ . '/../src/import.php';
 require_once __DIR__ . '/../src/stats.php';
+require_once __DIR__ . '/../src/tarification.php';
 
 $failures = 0;
 $checks = 0;
@@ -84,12 +85,52 @@ function build_stats_fixture(string $path): void
     $zip->close();
 }
 
+/** Лист «Тарификация»: ФИО | Предмет | Класс | Часы. */
+function build_tarif_fixture(string $path): void
+{
+    $strings = [
+        0 => 'ФИО учителя', 1 => 'Предмет', 2 => 'Класс', 3 => 'Часы',
+        4 => 'Иванов Иван Иванович', 5 => 'Математика', 6 => '5 А', 7 => '5 Б',
+        8 => 'Петров Пётр Петрович', 9 => 'Физика', 10 => '10В',
+    ];
+    $sheet = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<worksheet xmlns="' . NS_MAIN . '"><sheetData>'
+        . '<row r="1">' . cell_xml('A1', 0) . cell_xml('B1', 1) . cell_xml('C1', 2) . cell_xml('D1', 3) . '</row>'
+        . '<row r="2">' . cell_xml('A2', 4) . cell_xml('B2', 5) . cell_xml('C2', 6) . cell_xml('D2', '4', false) . '</row>'
+        . '<row r="3">' . cell_xml('A3', 4) . cell_xml('B3', 5) . cell_xml('C3', 7) . cell_xml('D3', '3', false) . '</row>'
+        . '<row r="4">' . cell_xml('A4', 8) . cell_xml('B4', 9) . cell_xml('C4', 10) . cell_xml('D4', '2', false) . '</row>'
+        . '</sheetData></worksheet>';
+    $shared = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<sst xmlns="' . NS_MAIN . '" count="' . count($strings) . '" uniqueCount="' . count($strings) . '">';
+    foreach ($strings as $s) $shared .= '<si><t>' . htmlspecialchars($s) . '</t></si>';
+    $shared .= '</sst>';
+    $workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<workbook xmlns="' . NS_MAIN . '" xmlns:r="' . NS_REL . '"><sheets>'
+        . '<sheet name="Тарификация" sheetId="1" r:id="rId1"/></sheets></workbook>';
+    $rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        . '</Relationships>';
+
+    $zip = new ZipArchive();
+    if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        throw new RuntimeException('Не удалось создать тестовый XLSX тарификации');
+    }
+    $zip->addFromString('xl/workbook.xml', $workbook);
+    $zip->addFromString('xl/_rels/workbook.xml.rels', $rels);
+    $zip->addFromString('xl/sharedStrings.xml', $shared);
+    $zip->addFromString('xl/worksheets/sheet1.xml', $sheet);
+    $zip->close();
+}
+
 /* ── Миграция и ключи ── */
 $pdo = get_db();
 init_db($pdo);
-check('user_version = 9', (int)$pdo->query('PRAGMA user_version')->fetchColumn() === 9);
+check('user_version = 10', (int)$pdo->query('PRAGMA user_version')->fetchColumn() === 10);
 $hasArchive = (int)$pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schedule_archive'")->fetchColumn();
 check('таблица schedule_archive создана', $hasArchive === 1);
+$hasTarif = (int)$pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tarification'")->fetchColumn();
+check('таблица tarification создана', $hasTarif === 1);
 
 echo "archive_week_key / stats_week_label_from_dates:\n";
 check('ключ по источнику', archive_week_key(3, ['2026-09-14', '2026-09-17']) === 's3');
@@ -139,8 +180,32 @@ unlink($tmp . '/archive/1_test_2026-09-02_2026-09-02.xlsx');
 $s = collect_teacher_stats($pdo);
 check('статистика читается из БД даже без файла', $s['total']['lessons'] === 1 && count($s['matrix']) === 0);
 
+/* ── Тарификация ── */
+echo "tarification:\n";
+check('короткое ФИО', tarification_short_fio('Иванов Иван Иванович') === 'Иванов И.И.');
+check('класс без пробелов', tarification_class_key('5 А') === '5А');
+check('предмет: регистр/ё не важны',
+    tarification_subject_key('Труд (Технология)') === tarification_subject_key('труд (технология)'));
+check('класс: точное совпадение', tarification_class_matches(['10Б' => 3], '10 Б'));
+check('класс: подгруппы (7Г1/7Г2 → 7Г)', tarification_class_matches(['7Г1' => 3, '7Г2' => 3], '7Г'));
+check('класс: нет совпадения', !tarification_class_matches(['10Б' => 3], '7Г'));
+$tarifFile = $tmp . '/tarif.xlsx';
+build_tarif_fixture($tarifFile);
+$tr = import_tarification_from_file($tarifFile, $pdo);
+check('импорт: 3 строки', ($tr['rows'] ?? 0) === 3);
+check('импорт: 2 педагога', ($tr['teachers'] ?? 0) === 2);
+$t = collect_tarification($pdo);
+$mathKey = tarification_subject_key('Математика');
+check('часы по предмету (Иванов/Математика = 7)', abs(($t['by_subject']['Иванов И.И.'][$mathKey] ?? 0) - 7) < 0.001);
+check('часы по классу 5А = 4', abs(($t['by_subject_class']['Иванов И.И.'][$mathKey]['5А'] ?? 0) - 4) < 0.001);
+check('часы по классу 5Б = 3', abs(($t['by_subject_class']['Иванов И.И.'][$mathKey]['5Б'] ?? 0) - 3) < 0.001);
+check('итого по педагогу = 7', abs(($t['total']['Иванов И.И.'] ?? 0) - 7) < 0.001);
+import_tarification_from_file($tarifFile, $pdo);
+check('повторный импорт полностью заменяет', (int)$pdo->query('SELECT COUNT(*) FROM tarification')->fetchColumn() === 3);
+
 /* Уборка */
 @unlink($tmp . '/schedule.db');
+@unlink($tarifFile);
 array_map('unlink', glob($tmp . '/archive/*') ?: []);
 @rmdir($tmp . '/archive');
 @rmdir($tmp);
