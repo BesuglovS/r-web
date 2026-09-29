@@ -76,7 +76,7 @@ if (-not $DryRun) {
   if ($sshPort -ne '22') { $mkdirArgs += "-P $sshPort" }
   if ($identityFile) { $mkdirArgs += "-i"; $mkdirArgs += $identityFile }
   $mkdirArgs += $remote
-  $mkdirArgs += "mkdir -p $remoteDbPath $remoteArchivePath && chown www-data:www-data $remoteDbPath $remoteArchivePath && chmod 775 $remoteDbPath $remoteArchivePath"
+  $mkdirArgs += "mkdir -p $remoteDbPath $remoteArchivePath 2>/dev/null; chmod 775 $remoteDbPath $remoteArchivePath 2>/dev/null; chown www-data:www-data $remoteDbPath $remoteArchivePath 2>/dev/null || true"
   & ssh @mkdirArgs
 }
 
@@ -169,7 +169,9 @@ if ($DryRun) {
   cmd /c $scpCmd
   if ($LASTEXITCODE -ne 0) { Write-Host "  Nginx config scp failed" -ForegroundColor Red; exit 1 }
 
-  $nginxDeploy = "cp $nginxRemote /tmp/nginx-backup-$nginxSite ; cp /tmp/nginx-$nginxSite $nginxRemote ; nginx -t"
+  # Установка через root-хелпер: он сам валидирует nginx -t и откатывает
+  # конфиг при ошибке.
+  $nginxDeploy = "sudo -n /usr/local/sbin/deploy-nginx.sh $nginxSite"
   $sshNginxArgs = @()
   if ($sshPort -ne '22') { $sshNginxArgs += "-P $sshPort" }
   if ($identityFile) { $sshNginxArgs += "-i"; $sshNginxArgs += $identityFile }
@@ -178,27 +180,9 @@ if ($DryRun) {
   & ssh @sshNginxArgs
 
   if ($LASTEXITCODE -ne 0) {
-    Write-Host "  nginx -t failed - rolling back previous config..." -ForegroundColor Red
-    $rollbackCmd = "cp /tmp/nginx-backup-$nginxSite $nginxRemote ; rm -f /tmp/nginx-$nginxSite /tmp/nginx-backup-$nginxSite ; systemctl reload nginx"
-    $sshRollbackArgs = @()
-    if ($sshPort -ne '22') { $sshRollbackArgs += "-P $sshPort" }
-    if ($identityFile) { $sshRollbackArgs += "-i"; $sshRollbackArgs += $identityFile }
-    $sshRollbackArgs += $remote
-    $sshRollbackArgs += $rollbackCmd
-    & ssh @sshRollbackArgs
-    Write-Host "  Rolled back. Deploy aborted." -ForegroundColor Red
+    Write-Host "  nginx deploy failed (config not applied). Deploy aborted." -ForegroundColor Red
     exit 1
   }
-
-  $reloadCmd = "systemctl reload nginx ; rm -f /tmp/nginx-$nginxSite /tmp/nginx-backup-$nginxSite"
-  $sshReloadArgs = @()
-  if ($sshPort -ne '22') { $sshReloadArgs += "-P $sshPort" }
-  if ($identityFile) { $sshReloadArgs += "-i"; $sshReloadArgs += $identityFile }
-  $sshReloadArgs += $remote
-  $sshReloadArgs += $reloadCmd
-  & ssh @sshReloadArgs
-
-  if ($LASTEXITCODE -ne 0) { Write-Host "  Nginx reload failed" -ForegroundColor Red; exit 1 }
   Write-Host "  Done." -ForegroundColor Green
 }
 
@@ -214,7 +198,7 @@ if ($DryRun) {
 } else {
   Write-Host "`n==> Setting up cron job ..." -ForegroundColor Cyan
 
-  $cronCmd = "echo '$cronContent' > /etc/cron.d/r-web && chmod 644 /etc/cron.d/r-web && touch $cronLog && chown ${cronUser}:${cronUser} $cronLog"
+  $cronCmd = "echo '$cronContent' > /etc/cron.d/r-web && chmod 644 /etc/cron.d/r-web && touch $cronLog && chown ${cronUser}:${cronUser} $cronLog 2>/dev/null || true"
   $sshCronArgs = @()
   if ($sshPort -ne '22') { $sshCronArgs += "-P $sshPort" }
   if ($identityFile) { $sshCronArgs += "-i"; $sshCronArgs += $identityFile }
