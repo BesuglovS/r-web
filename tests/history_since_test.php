@@ -1,3 +1,4 @@
+<?php if (PHP_SAPI !== "cli") { http_response_code(404); exit; } ?>
 <?php
 // Смоук SQL-ветки since_version (action=history&since_version=N):
 // группировка по версиям, подсчёт, детали — той же формы, что в api.php.

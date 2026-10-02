@@ -1,3 +1,4 @@
+<?php if (PHP_SAPI !== "cli") { http_response_code(404); exit; } ?>
 <?php
 /**
  * Тест: «Изменено» для показанного расписания должно браться из schedule_history.changed_at

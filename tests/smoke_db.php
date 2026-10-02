@@ -1,3 +1,4 @@
+<?php if (PHP_SAPI !== "cli") { http_response_code(404); exit; } ?>
 <?php
 // Временный интеграционный смоук: init_db / prune_old_data / backup_db
 putenv('SCHEDULE_DB_PATH=' . sys_get_temp_dir() . '/rweb_test/schedule.db');

@@ -1,3 +1,4 @@
+<?php if (PHP_SAPI !== "cli") { http_response_code(404); exit; } ?>
 <?php
 /**
  * Smoke-тест правок расписания: миграция v7 (+перенос room_corrections),

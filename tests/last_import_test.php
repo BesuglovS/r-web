@@ -1,3 +1,4 @@
+<?php if (PHP_SAPI !== "cli") { http_response_code(404); exit; } ?>
 <?php
 // Смоук SQL-логики last_import: checked_at по всем источникам (не только
 // активным) + фолбек на журнал проверок — та же форма запросов, что в api.php.
