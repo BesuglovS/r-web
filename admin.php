@@ -383,7 +383,24 @@ foreach ($log as $entry) {
         .source-inactive { color: #64748b; }
         .source-status-ok { color: #34d399; font-size: .8rem; }
         .source-status-error { color: #f87171; font-size: .8rem; }
-        .source-error-text { color: #f87171; font-size: .75rem; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* inline-block обязателен: у строчного span max-width и ellipsis игнорируются,
+           из-за чего длинный текст ошибки (HTTP 404 и т.п.) растягивал таблицу и страницу */
+        .source-error-text {
+            display: inline-block;
+            max-width: 100%;
+            vertical-align: top;
+            color: #f87171;
+            font-size: .75rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        /* Фиксированные колонки: длинный URL/сообщение об ошибке обрезаются,
+           а не растягивают таблицу за пределы карточки */
+        .sources-table { table-layout: fixed; }
+        .sources-table td { overflow: hidden; }
+        /* Длинные сообщения об ошибках (URL, JSON от Яндекса) не должны рвать вёрстку */
+        .msg, .last-import-error { overflow-wrap: anywhere; }
         .btn-edit { background: #1e40af; color: #bfdbfe; }
         .btn-edit:hover { background: #1d4ed8; }
         .btn-import { background: #059669; color: #d1fae5; }
@@ -419,6 +436,10 @@ foreach ($log as $entry) {
         tr.clickable:hover td { background: #26334d; }
 
         .hint { color: #64748b; font-size: .8rem; margin-top: .5rem; }
+
+        /* Горизонтальный скролл таблиц на узких экранах вместо растягивания страницы */
+        .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        .table-wrap table { min-width: 720px; }
 
         .last-import-card { padding: 1rem 1.5rem; }
         .last-import-card.status-ok { border-left: 4px solid #34d399; }
@@ -524,7 +545,16 @@ foreach ($log as $entry) {
             <?php if (empty($sources)): ?>
                 <p style="color: #64748b;">Нет добавленных источников</p>
             <?php else: ?>
-                <table>
+                <div class="table-wrap">
+                <table class="sources-table">
+                    <colgroup>
+                        <col style="width:3.5rem">
+                        <col>
+                        <col style="width:17%">
+                        <col style="width:11%">
+                        <col style="width:30%">
+                        <col style="width:22%">
+                    </colgroup>
                     <thead>
                         <tr>
                             <th>ID</th>
@@ -591,6 +621,7 @@ foreach ($log as $entry) {
                         <?php endforeach; ?>
                     </tbody>
                 </table>
+                </div>
             <?php endif; ?>
 
             <form method="POST">
@@ -670,6 +701,7 @@ foreach ($log as $entry) {
                 <?php if (empty($log)): ?>
                     <p style="color: #64748b;">Импортов ещё не было</p>
                 <?php else: ?>
+                    <div class="table-wrap">
                     <table>
                         <thead>
                             <tr>
@@ -694,6 +726,7 @@ foreach ($log as $entry) {
                             <?php endforeach; ?>
                         </tbody>
                     </table>
+                    </div>
                 <?php endif; ?>
             </div>
 
@@ -705,6 +738,7 @@ foreach ($log as $entry) {
                 <?php if (empty($check_log)): ?>
                     <p style="color: #64748b;">Проверок ещё не было</p>
                 <?php else: ?>
+                    <div class="table-wrap">
                     <table>
                         <thead>
                             <tr>
@@ -736,6 +770,7 @@ foreach ($log as $entry) {
                             <?php endforeach; ?>
                         </tbody>
                     </table>
+                    </div>
                 <?php endif; ?>
             </div>
         </div>
