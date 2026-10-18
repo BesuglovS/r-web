@@ -143,6 +143,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
             $message = 'Ошибка: ' . $e->getMessage();
             $message_type = 'error';
         }
+    } elseif (isset($_POST['restore_archive'])) {
+        try {
+            $result = restore_schedule_from_archive(get_db());
+            $weeks = count($result['dates'] ?? []);
+            $lessons = (int)($result['lessons'] ?? 0);
+            if ($weeks === 0) {
+                $message = 'Восстановление не требуется: все недели из архива уже есть в расписании';
+                $message_type = 'success';
+            } else {
+                $message = "Из архива возвращено недель: {$weeks}, уроков: {$lessons}";
+                $message_type = 'success';
+            }
+        } catch (Exception $e) {
+            $message = 'Ошибка: ' . $e->getMessage();
+            $message_type = 'error';
+        }
     } elseif (isset($_POST['edit_source'])) {
         $id = (int)($_POST['source_id'] ?? 0);
         $url = trim($_POST['source_url'] ?? '');
@@ -170,8 +186,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
             if ($errors > 0) {
                 $msg .= " ({$errors} ошибок)";
             }
+            $archive_errors = $result['archive_errors'] ?? [];
+            if (!empty($archive_errors)) {
+                $msg .= '. Архив не обновлён: ' . implode('; ', array_map(
+                    fn($id, $err) => '#' . $id . ': ' . $err,
+                    array_keys($archive_errors),
+                    array_values($archive_errors)
+                ));
+            }
             $message = $msg;
-            $message_type = $errors > 0 ? 'error' : 'success';
+            $message_type = ($errors > 0 || !empty($archive_errors)) ? 'error' : 'success';
         } catch (Exception $e) {
             $message = 'Ошибка: ' . $e->getMessage();
             $message_type = 'error';
@@ -190,10 +214,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['password'])) {
             $result = do_import($src['url'], $spdo);
             update_source_status($id, $result['status'] ?? 'ok', '', $spdo);
             update_source_dates($spdo, $id, $result['dates'] ?? []);
+            // Резервная копия: файл с Яндекс.Диска могут удалить в любой момент
+            $archive_error = try_archive_source($spdo, $src);
             $lessons = (int)($result['lessons'] ?? 0);
             $label = trim((string)$src['label']) !== '' ? $src['label'] : $src['url'];
             $message = "«{$label}»: импортировано {$lessons} уроков";
             $message_type = 'success';
+            if ($archive_error !== null) {
+                $message .= ". Архив не обновлён: {$archive_error}";
+                $message_type = 'error';
+            }
         } catch (Exception $e) {
             if ($spdo !== null) {
                 update_source_status($id, 'error', $e->getMessage(), $spdo);
@@ -234,6 +264,20 @@ function resolve_import_for_check(array $imports_by_url, string $url, string $ch
 }
 
 $sources = get_sources();
+
+// Наличие XLSX-файла каждого источника в архиве — по префиксу "<id>_" имени
+// файла. Один glob на всю таблицу: источников немного, а так видно, какие
+// недели можно спокойно удалять с Яндекс.Диска.
+$archive_files = [];
+try {
+    foreach (glob(get_archive_dir() . '/*_*.xlsx') ?: [] as $file) {
+        if (preg_match('/^(\d+)_/', basename($file), $m)) {
+            $archive_files[(int)$m[1]] = $file;
+        }
+    }
+} catch (Exception $e) {
+    $archive_files = [];
+}
 
 $log = [];
 $check_log = [];
@@ -439,7 +483,7 @@ foreach ($log as $entry) {
 
         /* Горизонтальный скролл таблиц на узких экранах вместо растягивания страницы */
         .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-        .table-wrap table { min-width: 720px; }
+        .table-wrap table { min-width: 800px; }
 
         .last-import-card { padding: 1rem 1.5rem; }
         .last-import-card.status-ok { border-left: 4px solid #34d399; }
@@ -550,10 +594,11 @@ foreach ($log as $entry) {
                     <colgroup>
                         <col style="width:3.5rem">
                         <col>
-                        <col style="width:17%">
-                        <col style="width:11%">
-                        <col style="width:30%">
-                        <col style="width:22%">
+                        <col style="width:16%">
+                        <col style="width:10%">
+                        <col style="width:25%">
+                        <col style="width:9%">
+                        <col style="width:20%">
                     </colgroup>
                     <thead>
                         <tr>
@@ -562,6 +607,7 @@ foreach ($log as $entry) {
                             <th>URL</th>
                             <th>Статус</th>
                             <th>Последний импорт</th>
+                            <th>Архив</th>
                             <th>Действия</th>
                         </tr>
                     </thead>
@@ -588,6 +634,17 @@ foreach ($log as $entry) {
                                         <?php endif; ?>
                                     <?php else: ?>
                                         <span style="color:#64748b;">—</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php if (isset($archive_files[(int)$src['id']])): ?>
+                                        <?php $af = $archive_files[(int)$src['id']]; $af_ts = @filemtime($af) ?: 0; ?>
+                                        <span class="source-active" title="<?= htmlspecialchars(basename($af)) ?>">есть</span>
+                                        <?php if ($af_ts > 0): ?>
+                                            <br><span style="font-size:.75rem;color:#64748b;"><?= htmlspecialchars(date('d.m.Y', $af_ts)) ?></span>
+                                        <?php endif; ?>
+                                    <?php else: ?>
+                                        <span class="source-inactive">нет</span>
                                     <?php endif; ?>
                                 </td>
                                 <td>
@@ -653,6 +710,19 @@ foreach ($log as $entry) {
                 Переносит уроки из XLSX-файлов архива в БД (таблица <code>schedule_archive</code>) —
                 статистика педагогов считается из БД. Нужно один раз для старых недель;
                 новые импорты пишутся в БД автоматически.
+            </p>
+
+            <form method="POST" style="margin-top:.75rem;">
+                <?= csrf_field() ?>
+                <button type="submit" name="restore_archive" value="1" class="btn-import-all">
+                    Вернуть расписание прошлых недель из архива
+                </button>
+            </form>
+            <p class="hint" style="margin:.5rem 0 0;">
+                Возвращает в расписание уроки прошедших недель, которых там сейчас нет,
+                из БД-архива (таблица <code>schedule_archive</code>). Нужно после того,
+                как старые недели были вычищены, а файлы на Яндекс.Диске удалены.
+                Уже существующие недели не затрагиваются.
             </p>
         </div>
 

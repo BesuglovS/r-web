@@ -82,6 +82,12 @@ foreach ($result['results'] as $r) {
     }
 }
 
+if (!empty($result['archive_errors'])) {
+    foreach ($result['archive_errors'] as $aid => $aerr) {
+        echo "  [АРХИВ] ID={$aid}: файл не сохранён в архив — $aerr\n";
+    }
+}
+
 if (!empty($result['cleanup']['removed_dates'])) {
     $c = $result['cleanup'];
     echo "  [ОЧИСТКА] Удалены устаревшие даты: " . implode(', ', $c['removed_dates']) . " ({$c['lessons']} уроков)\n";

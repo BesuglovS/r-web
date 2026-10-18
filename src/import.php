@@ -627,6 +627,31 @@ function delete_source(int $id): array
     }
     init_db($pdo);
 
+    $src = null;
+    foreach (get_sources($pdo) as $s) {
+        if ((int)$s['id'] === $id) {
+            $src = $s;
+            break;
+        }
+    }
+    if ($src === null) {
+        throw new RuntimeException('Источник не найден');
+    }
+
+    // Файлы с Яндекс.Диска удаляются, поэтому перед удалением источника
+    // обязательно сохраняем его последнюю версию в архив. Если скачать не
+    // удалось и архива ещё нет — источник НЕ удаляем (иначе потеряем данные).
+    try {
+        archive_source_file($src, $pdo);
+    } catch (Exception $e) {
+        throw new RuntimeException(
+            'Нельзя удалить источник: не удалось сохранить файл в архив (' . $e->getMessage() . '). '
+            . 'Проверьте ссылку или сначала импортируйте источник.'
+        );
+    }
+
+    // Строки schedule_archive и файл архива не трогаем: это резервная копия,
+    // по ней неделя удалённого источника остаётся доступной.
     $stmt = $pdo->prepare("DELETE FROM schedule_sources WHERE id = ?");
     $stmt->execute([$id]);
 
@@ -932,6 +957,28 @@ function archive_all_sources(): array
 }
 
 /**
+ * Автоархивация после успешного импорта: сохраняет последнюю версию XLSX
+ * в каталог архива (файл на Диске могут удалить в любой момент).
+ *
+ * Ошибку не пробрасывает: импорт уже состоялся, данные в БД корректны,
+ * поэтому сбой архивации только фиксируется в журнале проверок (check_log)
+ * и возвращается строкой. Возвращает null, если архив сохранён/актуален.
+ */
+function try_archive_source(PDO $pdo, array $source): ?string
+{
+    $id = (int)($source['id'] ?? 0);
+    $url = (string)($source['url'] ?? '');
+    try {
+        archive_source_file($source, $pdo);
+        return null;
+    } catch (Exception $e) {
+        $msg = $e->getMessage();
+        log_check($pdo, $id, $url, 'archive_error', '', '', $msg);
+        return $msg;
+    }
+}
+
+/**
  * Ключ архивной недели: по источнику ('s<id>') либо по диапазону дат для
  * ad-hoc импорта без источника ('d_<первая>_<последняя>').
  */
@@ -1065,6 +1112,134 @@ function backfill_archive_from_files(?PDO $existing_pdo = null): array
     ];
 }
 
+/**
+ * Возвращает в живую таблицу schedule уроки прошедших недель из БД-архива
+ * (schedule_archive). Нужно после того, как старые недели были вычищены
+ * автоочисткой: файлы на Яндекс.Диске удаляются, а архив остаётся.
+ *
+ * Восстанавливаются только даты, которых сейчас НЕТ в schedule и которые
+ * принадлежат неактивным/удалённым источникам (или ad-hoc импорту,
+ * source_id = 0). Даты активных источников не трогаем — ими управляет импорт.
+ *
+ * Дубликаты слотов (одна дата могла попасть в несколько недель архива)
+ * схлопываются по ключу date|class|lesson_num|time_start|group — остаётся
+ * самая свежая запись по archived_at. История изменения не пишется: это
+ * восстановление резерва, а не изменение расписания.
+ *
+ * $dry_run = true — только посчитать, ничего не менять (ROLLBACK).
+ */
+function restore_schedule_from_archive(PDO $pdo, bool $dry_run = false): array
+{
+    init_db($pdo);
+
+    $rows = $pdo->query(
+        "SELECT a.id, a.source_id, a.date, a.day_of_week, a.class_name, a.lesson_num,
+                a.time_start, a.time_end, a.subject, a.teacher, a.room,
+                a.parallel_group, a.archived_at
+         FROM schedule_archive a
+         WHERE a.date NOT IN (SELECT date FROM schedule)
+           AND (a.source_id = 0
+                OR a.source_id NOT IN (SELECT id FROM schedule_sources WHERE is_active = 1))
+         ORDER BY a.date, a.class_name, a.time_start, a.lesson_num, a.id"
+    )->fetchAll(PDO::FETCH_ASSOC);
+
+    // Время последнего импорта источника — честное «Изменено» для его недели.
+    // archived_at у недель, залитых бэкфиллом из файлов, равен времени бэкфилла.
+    $source_imported = [];
+    foreach ($pdo->query("SELECT id, last_imported_at FROM schedule_sources") as $s) {
+        $t = (string)($s['last_imported_at'] ?? '');
+        if ($t !== '') {
+            $source_imported[(int)$s['id']] = $t;
+        }
+    }
+
+    // Схлопываем дубликаты слотов: свежая запись (archived_at, затем id) важнее
+    $by_date = [];
+    foreach ($rows as $r) {
+        $key = implode("\x1F", [
+            $r['date'], $r['class_name'], $r['lesson_num'],
+            $r['time_start'], (string)($r['parallel_group'] ?? ''),
+        ]);
+        if (!isset($by_date[$r['date']][$key])) {
+            $by_date[$r['date']][$key] = $r;
+            continue;
+        }
+        $prev = $by_date[$r['date']][$key];
+        if ((string)$r['archived_at'] > (string)$prev['archived_at']
+            || ((string)$r['archived_at'] === (string)$prev['archived_at'] && (int)$r['id'] > (int)$prev['id'])) {
+            $by_date[$r['date']][$key] = $r;
+        }
+    }
+
+    $weekday_short = [1 => 'ПН', 2 => 'ВТ', 3 => 'СР', 4 => 'ЧТ', 5 => 'ПТ', 6 => 'СБ', 7 => 'ВС'];
+
+    $ins = $pdo->prepare(
+        "INSERT INTO schedule
+            (sheet_name, date, day_of_week, class_name, lesson_num, time_start,
+             time_end, subject, teacher, room, parallel_group, imported_at)
+         VALUES (:sheet_name, :date, :day_of_week, :class_name, :lesson_num, :time_start,
+                 :time_end, :subject, :teacher, :room, :parallel_group, :imported_at)"
+    );
+
+    $restored_dates = [];
+    $restored_lessons = 0;
+    $now = gmdate('Y-m-d H:i:s');
+
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        foreach ($by_date as $date => $lessons) {
+            $dt = DateTime::createFromFormat('Y-m-d', (string)$date);
+            $short = ($dt && $dt->format('Y-m-d') === $date)
+                ? ($weekday_short[(int)$dt->format('N')] ?? '')
+                : '';
+            $sheet_name = trim($short . ' ' . ($dt ? $dt->format('d.m') : ''));
+
+            foreach ($lessons as $l) {
+                // «Изменено» = время последнего импорта недели (источника);
+                // иначе — время записи в архив, иначе — сейчас
+                $sid = (int)($l['source_id'] ?? 0);
+                if ($sid > 0 && isset($source_imported[$sid])) {
+                    $imported_at = $source_imported[$sid];
+                } else {
+                    $imported_at = (string)($l['archived_at'] ?? '') !== '' ? (string)$l['archived_at'] : $now;
+                }
+
+                $ins->execute([
+                    ':sheet_name'     => $sheet_name,
+                    ':date'           => $l['date'],
+                    ':day_of_week'    => $l['day_of_week'],
+                    ':class_name'     => $l['class_name'],
+                    ':lesson_num'     => (int)$l['lesson_num'],
+                    ':time_start'     => $l['time_start'],
+                    ':time_end'       => $l['time_end'],
+                    ':subject'        => $l['subject'],
+                    ':teacher'        => $l['teacher'],
+                    ':room'           => (string)($l['room'] ?? ''),
+                    ':parallel_group' => $l['parallel_group'],
+                    ':imported_at'    => $imported_at,
+                ]);
+                $restored_lessons++;
+            }
+            $restored_dates[] = (string)$date;
+        }
+
+        $pdo->exec($dry_run ? 'ROLLBACK' : 'COMMIT');
+    } catch (Exception $e) {
+        try {
+            $pdo->exec('ROLLBACK');
+        } catch (Exception $ignored) {
+            // транзакция уже закрыта самим SQLite (авто-rollback при ошибке)
+        }
+        throw $e;
+    }
+
+    return [
+        'dry_run'        => $dry_run,
+        'dates'          => $restored_dates,
+        'lessons'        => $restored_lessons,
+    ];
+}
+
 function do_import_all(): array
 {
     $pdo = get_db();
@@ -1078,6 +1253,7 @@ function do_import_all(): array
 
     $results = [];
     $errors = [];
+    $archive_errors = []; // ошибки автоархивации (файл не сохранён, импорт не ломаем)
     $ok_dates = []; // даты, покрытые успешно импортированными источниками
 
     foreach ($active as $source) {
@@ -1087,6 +1263,12 @@ function do_import_all(): array
             $result = do_import($url, $pdo);
             update_source_status($id, $result['status'] ?? 'ok', '', $pdo);
             update_source_dates($pdo, $id, $result['dates'] ?? []);
+            // Резервная копия: файл на Диске может быть удалён в любой момент,
+            // поэтому архив обновляем сразу после каждого импорта.
+            $archive_error = try_archive_source($pdo, $source);
+            if ($archive_error !== null) {
+                $archive_errors[$id] = $archive_error;
+            }
             $ok_dates = array_merge($ok_dates, $result['dates'] ?? []);
             $results[] = ['id' => $id, 'url' => $url, 'result' => $result];
         } catch (Exception $e) {
@@ -1104,7 +1286,7 @@ function do_import_all(): array
     $cleanup = ['removed_dates' => [], 'lessons' => 0];
     if (!empty($active) && empty($errors)) {
         try {
-            $cleanup = cleanup_stale_dates($pdo, $ok_dates);
+            $cleanup = cleanup_stale_dates($pdo, collect_keep_dates($pdo, $ok_dates));
         } catch (Exception $e) {
             $cleanup = ['removed_dates' => [], 'lessons' => 0, 'error' => $e->getMessage()];
         }
@@ -1117,6 +1299,7 @@ function do_import_all(): array
         'results' => $results,
         'error_details' => $errors,
         'last_error' => $errors ? $errors[count($errors) - 1] : null,
+        'archive_errors' => $archive_errors,
         'cleanup' => $cleanup,
     ];
 }
@@ -1148,14 +1331,17 @@ function do_import_last(): array
         $result = do_import($url, $pdo);
         update_source_status($id, $result['status'] ?? 'ok', '', $pdo);
         update_source_dates($pdo, $id, $result['dates'] ?? []);
+        // Резервная копия последней версии (файл с Диска могут удалить)
+        $archive_error = try_archive_source($pdo, $source);
 
         return [
             'total'   => 1,
             'success' => 1,
             'errors'  => 0,
-            'results' => [['id' => $id, 'url' => $url, 'result' => $result]],
+            'results' => [['id' => $id, 'url' => $url, 'result' => $result, 'archive_error' => $archive_error]],
             'error_details' => [],
             'last_error' => null,
+            'archive_errors' => $archive_error !== null ? [$id => $archive_error] : [],
             'cleanup' => ['removed_dates' => [], 'lessons' => 0],
         ];
     } catch (Exception $e) {
@@ -1175,8 +1361,61 @@ function do_import_last(): array
 }
 
 /**
+ * Полный список дат, которые нельзя удалять из schedule.
+ *
+ * Кроме дат активных источников ($active_dates — результаты импортов и
+ * last_dates unchanged-источников) сохраняем недели выключенных и удалённых
+ * источников: файлы на Яндекс.Диске удаляются, поэтому закончившаяся неделя
+ * должна оставаться на сайте навсегда (резерв — schedule_archive/XLSX-архив).
+ *
+ * Источники дат:
+ *   1) $active_dates;
+ *   2) last_dates всех выключенных источников (страховка для недель,
+ *      заархивированных до появления schedule_archive);
+ *   3) schedule_archive для всего, что не является активным источником:
+ *      выключенные (is_active = 0), удалённые (нет строки) и ad-hoc импорт
+ *      по ссылке без источника (source_id = 0).
+ */
+function collect_keep_dates(PDO $pdo, array $active_dates): array
+{
+    $keep = array_values(array_unique(array_filter($active_dates)));
+
+    try {
+        $inactive = $pdo->query(
+            "SELECT last_dates FROM schedule_sources WHERE is_active = 0"
+        )->fetchAll(PDO::FETCH_COLUMN);
+        foreach ($inactive as $json) {
+            $dates = json_decode((string)$json, true);
+            if (is_array($dates)) {
+                foreach ($dates as $d) {
+                    $d = (string)$d;
+                    if ($d !== '') {
+                        $keep[] = $d;
+                    }
+                }
+            }
+        }
+
+        $archived = $pdo->query(
+            "SELECT DISTINCT date FROM schedule_archive
+             WHERE source_id = 0
+                OR source_id NOT IN (SELECT id FROM schedule_sources WHERE is_active = 1)"
+        )->fetchAll(PDO::FETCH_COLUMN);
+        foreach ($archived as $d) {
+            $keep[] = (string)$d;
+        }
+    } catch (Exception $e) {
+        // Ошибка чтения — лучше сохранить больше дат, чем снести лишние,
+        // поэтому возвращаем хотя бы даты активных источников.
+    }
+
+    return array_values(array_unique(array_filter($keep)));
+}
+
+/**
  * Удаляет из schedule даты, которых нет среди $keep_dates
- * (недели, исчезнувшие из всех активных источников).
+ * (даты, исчезнувшие из ФАЙЛОВ активных источников).
+ * Недели выключенных/удалённых источников сохраняются — см. collect_keep_dates().
  * Удалённые уроки фиксируются в schedule_history как 'removed' одной версией.
  * Вызывается только когда ВСЕ активные источники прошли полный импорт
  * в рамках одного цикла — иначе список дат неполный.
@@ -1339,6 +1578,7 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
 
     $results = [];
     $errors = [];
+    $archive_errors = []; // ошибки автоархивации (импорт при этом успешен)
     $covered = 0;        // источники, чьи даты подтверждены (импорт ИЛИ unchanged)
     $ok_dates = [];      // даты, покрытые успешно импортированными источниками
 
@@ -1378,10 +1618,25 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
                 update_source_check($pdo, $id, $meta);
                 log_check($pdo, $id, $url, 'changed', $old_md5, $meta['md5'], $reason . ' -> ' . ($result['status'] ?? 'ok'));
 
+                // Резервная копия: файл могут удалить с Диска сразу после
+                // изменения, поэтому архивируем при каждом полном импорте
+                // (сам archive_source_file() пропустит скачивание по md5).
+                $archive_error = try_archive_source($pdo, $source);
+                if ($archive_error !== null) {
+                    $archive_errors[$id] = $archive_error;
+                }
+
                 $covered++;
                 $ok_dates = array_merge($ok_dates, $result['dates'] ?? []);
 
-                $results[] = ['id' => $id, 'url' => $url, 'check' => 'changed', 'reason' => $reason, 'result' => $result];
+                $results[] = [
+                    'id' => $id,
+                    'url' => $url,
+                    'check' => 'changed',
+                    'reason' => $reason,
+                    'result' => $result,
+                    'archive_error' => $archive_error,
+                ];
             } else {
                 update_source_check($pdo, $id, $meta);
                 log_check($pdo, $id, $url, 'unchanged', $old_md5, $meta['md5']);
@@ -1413,10 +1668,12 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
     // Автоочистка устаревших дат: только когда даты ВСЕХ активных источников
     // подтверждены (полный импорт ИЛИ unchanged с известными last_dates) —
     // иначе список дат неполный и мы рискуем снести чужие даты.
+    // collect_keep_dates() добавляет к датам активных источников недели
+    // выключенных и удалённых источников — они остаются видимыми на сайте.
     $cleanup = ['removed_dates' => [], 'lessons' => 0];
     if (!empty($active) && $covered === count($active)) {
         try {
-            $cleanup = cleanup_stale_dates($pdo, $ok_dates);
+            $cleanup = cleanup_stale_dates($pdo, collect_keep_dates($pdo, $ok_dates));
         } catch (Exception $e) {
             $cleanup = ['removed_dates' => [], 'lessons' => 0, 'error' => $e->getMessage()];
         }
@@ -1437,6 +1694,7 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
         'results' => $results,
         'error_details' => $errors,
         'last_error' => $errors ? $errors[count($errors) - 1] : null,
+        'archive_errors' => $archive_errors,
         'cleanup' => $cleanup,
     ];
 }
