@@ -239,6 +239,33 @@ function lesson_key(array $l): string
 }
 
 /**
+ * Ключ полной строки урока: lesson_key() + кабинет. Нужен только для
+ * схлопывания буквальных дублей источника (одна и та же запись повторена в
+ * XLSX несколько раз). В lesson_key кабинета нет намеренно (смена кабинета
+ * отслеживается отдельно), поэтому одинаковые уроки в разных кабинетах —
+ * не дубли и должны сохраниться.
+ */
+function lesson_full_key(array $l): string
+{
+    return lesson_key($l) . '|' . trim((string)($l['room'] ?? ''));
+}
+
+/**
+ * Схлопывает буквальные дубли строк расписания (совпадают все поля, включая
+ * кабинет и параллельную группу), оставляя первую запись. Дубли в исходном
+ * XLSX иначе вставляются в schedule/schedule_archive столько раз, сколько
+ * строк в файле, а diff их не видит (ключ один) и никогда не удаляет.
+ */
+function dedupe_lessons(array $lessons): array
+{
+    $unique = [];
+    foreach ($lessons as $l) {
+        $unique[lesson_full_key($l)] = $l;
+    }
+    return array_values($unique);
+}
+
+/**
  * Проверяет, что ссылка ведёт на Яндекс.Диск (защита от произвольных URL).
  */
 function is_valid_yandex_url(string $public_url): bool
@@ -356,6 +383,11 @@ function do_import(string $public_url, ?PDO $existing_pdo = null): array
                         'parallel_group' => $l['parallel_group'],
                     ];
                 }
+
+                // Буквальные дубли строк источника схлопываем ДО сравнения и
+                // вставки: иначе они попадают в schedule по числу копий в XLSX,
+                // а diff (ключ без кабинета) их не замечает.
+                $new_lessons = dedupe_lessons($new_lessons);
 
                 $new_by_key = [];
                 foreach ($new_lessons as $l) {
@@ -1006,6 +1038,10 @@ function archive_lessons(PDO $pdo, int $source_id, string $week_key, array $less
     if (empty($lessons)) {
         return 0;
     }
+
+    // Буквальные дубли строк источника (в т.ч. после бэкфилла из XLSX) не
+    // пишем в архив: иначе статистика педагогов считает урок несколько раз.
+    $lessons = dedupe_lessons($lessons);
 
     $stmt = $pdo->prepare("
         INSERT INTO schedule_archive

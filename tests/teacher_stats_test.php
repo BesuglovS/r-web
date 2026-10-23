@@ -127,7 +127,7 @@ function build_tarif_fixture(string $path): void
 /* ── Миграция и ключи ── */
 $pdo = get_db();
 init_db($pdo);
-check('user_version = 10', (int)$pdo->query('PRAGMA user_version')->fetchColumn() === 10);
+check('user_version = 11', (int)$pdo->query('PRAGMA user_version')->fetchColumn() === 11);
 $hasArchive = (int)$pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schedule_archive'")->fetchColumn();
 check('таблица schedule_archive создана', $hasArchive === 1);
 $hasTarif = (int)$pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tarification'")->fetchColumn();

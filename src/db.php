@@ -132,8 +132,11 @@ function init_db(PDO $pdo): void
     //     статистики педагогов; заполняется при импорте и бэкфиллом из файлов).
     // 10 = + таблица tarification (нужное число часов по предметам у педагогов из
     //     файла «Тарификация»; показывается на странице педагога).
+    // 11 = + уникальные индексы расписания/архива: буквальные дубли строк
+    //     схлопываются (остаётся самая свежая запись), повторная вставка
+    //     одной и той же строки больше невозможна.
     $ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-    if ($ver >= 10) {
+    if ($ver >= 11) {
         $inited[$key] = true;
         return;
     }
@@ -237,10 +240,11 @@ function init_db(PDO $pdo): void
     migrate_edits_parallel_group($pdo);
     migrate_schedule_archive($pdo);
     migrate_tarification($pdo);
+    migrate_unique_lessons($pdo);
 
     // Поднять версию схемы (после UTC-миграции, чтобы она успела отработать на старых БД)
-    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 10) {
-        $pdo->exec('PRAGMA user_version = 10');
+    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 11) {
+        $pdo->exec('PRAGMA user_version = 11');
     }
 
     $inited[$key] = true;
@@ -538,6 +542,50 @@ function migrate_tarification(PDO $pdo): void
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tarif_teacher ON tarification(teacher)");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tarif_teacher_subject ON tarification(teacher, subject)");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tarif_subject_class ON tarification(subject, class_name)");
+}
+
+/**
+ * Миграция v11: схлопывает буквальные дубли уроков и запрещает их повторение.
+ *
+ * Дубли появлялись из самого XLSX (одна и та же строка была вставлена в файл
+ * несколько раз). Импорт вставлял их 1:1, а diff по ключу без кабинета их не
+ * видел, поэтому лишние строки оставались в расписании навсегда.
+ *
+ * Оставляем самую свежую запись (максимальный id) каждого полного ключа:
+ * date + class + lesson_num + время + предмет + педагог + кабинет + группа.
+ * Уникальные индексы повторяют тот же набор колонок (IFNULL — чтобы NULL-группа
+ * не считалась отдельной от пустой).
+ */
+function migrate_unique_lessons(PDO $pdo): void
+{
+    $pdo->exec("
+        DELETE FROM schedule
+         WHERE id NOT IN (
+             SELECT MAX(id) FROM schedule
+              GROUP BY date, class_name, lesson_num, time_start, time_end,
+                       subject, teacher, room, IFNULL(parallel_group, '')
+         )
+    ");
+    $pdo->exec("
+        DELETE FROM schedule_archive
+         WHERE id NOT IN (
+             SELECT MAX(id) FROM schedule_archive
+              GROUP BY week_key, date, class_name, lesson_num, time_start, time_end,
+                       subject, teacher, room, IFNULL(parallel_group, '')
+         )
+    ");
+
+    $pdo->exec("
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_schedule_lesson
+            ON schedule(date, class_name, lesson_num, time_start, time_end,
+                        subject, teacher, room, IFNULL(parallel_group, ''))
+    ");
+    $pdo->exec("
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_schedule_archive_lesson
+            ON schedule_archive(week_key, date, class_name, lesson_num, time_start,
+                                time_end, subject, teacher, room,
+                                IFNULL(parallel_group, ''))
+    ");
 }
 
 /**

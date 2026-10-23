@@ -48,7 +48,7 @@
 ├── .env                # Конфиг деплоя + пароль админа (bcrypt-хеш)
 ├── .gitignore
 ├── link.txt            # Ссылка на XLSX на Яндекс Диске (мигрирует в БД)
-└── tests/              # Тесты: parser_test.php, smoke_db.php, schedule_edits_test.php, teacher_stats_test.php, archive_keep_test.php, source_delete_test.php, restore_archive_test.php (`php tests/parser_test.php`)
+└── tests/              # Тесты: parser_test.php, smoke_db.php, schedule_edits_test.php, teacher_stats_test.php, archive_keep_test.php, source_delete_test.php, restore_archive_test.php, import_dedupe_test.php (`php tests/parser_test.php`)
 ```
 
 ### Database (SQLite)
@@ -90,7 +90,7 @@
 
 Страница `admin_stats_unmatched.php` («Расхождения с тарификацией», ссылка из admin.php и admin_stats.php) показывает тройки «педагог — предмет — класс», найденные в архиве расписания, но отсутствующие в тарификации; помечает педагогов, которых нет в тарификации вовсе. Сопоставление: предмет — через `tarification_subject_key()` (без учёта регистра, пробелов и «ё/е»), класс — через `tarification_class_matches()` (без пробелов; подгруппы «7Г1»/«7Г2» засчитываются как «7Г»). CSV — `?export=csv`.
 
-Индексы: `idx_schedule_class`, `idx_schedule_teacher`, `idx_schedule_date`, `idx_schedule_date_class`, `idx_schedule_date_time`, `idx_history_version`, `idx_history_date`, `idx_history_changed_at`, `idx_import_log_imported_at`, `idx_check_log_checked_at`
+Индексы: `idx_schedule_class`, `idx_schedule_teacher`, `idx_schedule_date`, `idx_schedule_date_class`, `idx_schedule_date_time`, `idx_history_version`, `idx_history_date`, `idx_history_changed_at`, `idx_import_log_imported_at`, `idx_check_log_checked_at`, уникальные `uniq_schedule_lesson` и `uniq_schedule_archive_lesson` (защита от буквальных дублей уроков)
 
 ### API Endpoints (`api.php`)
 
@@ -115,7 +115,7 @@
 | `edit_save` | POST | Да + CSRF | Сохранить правку / добавить урок / скрыть урок |
 | `edit_delete` | POST | Да + CSRF | Удалить правку (вернуть как в источнике) |
 
-Схема миграций: `PRAGMA user_version` (10 = актуальная). Транзакции импорта — `BEGIN IMMEDIATE` (защита от гонки версий истории при параллельных импортах). Публичные GET-эндпоинты ограничены rate-limit'ом по IP (240 запросов/мин, файл под flock).
+Схема миграций: `PRAGMA user_version` (11 = актуальная; v11 схлопывает накопленные дубли уроков и создаёт уникальные индексы `uniq_schedule_lesson` / `uniq_schedule_archive_lesson`). Транзакции импорта — `BEGIN IMMEDIATE` (защита от гонки версий истории при параллельных импортах). Публичные GET-эндпоинты ограничены rate-limit'ом по IP (240 запросов/мин, файл под flock).
 
 ## Development Commands
 
