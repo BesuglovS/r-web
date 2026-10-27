@@ -17,6 +17,7 @@
 ├── teachers.html       # Расписание учителей
 ├── free.html           # Свободные аудитории (корпус + дата + время, сетка плиток)
 ├── android.html        # Лендинг приложения Android: скачивание APK + RuStore («скоро», модерация)
+├── school.html         # Программа Осенней научно-творческой школы (26.10–03.11.2026) + ссылки на онлайн-занятия
 ├── downloads/          # Установочные файлы: schedule-<version>.apk (из релиза r-android)
 ├── archive/            # Архив исходных XLSX (прод: рядом с docroot, вне public/; создаёт deploy.ps1)
 ├── history.php         # Страница «Изменения расписания» (публичная)
@@ -206,6 +207,7 @@ php -S localhost:8000
 | `teachers.html` | Расписание учителей (шапка с ссылкой на android.html) |
 | `free.html` | Свободные аудитории (шапка с ссылкой на android.html) |
 | `android.html` | Лендинг приложения: кнопка «Скачать APK» + неактивная карточка RuStore |
+| `school.html` | Программа научно-творческой школы: расписание по дням, аудитории, онлайн-занятия со ссылками |
 | `RuStore_logo.svg.png` | Логотип RuStore для лендинга |
 | `android-icon.png` | Иконка Android-робота в шапке (ссылка на android.html) |
 | `downloads/` | APK для лендинга (`schedule-<version>.apk`) |

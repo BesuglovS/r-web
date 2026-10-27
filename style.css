@@ -99,6 +99,19 @@ html:not([data-theme]) .theme-btn .icon-sun{display:inline}
 .android-btn img{width:1.05rem;height:1.05rem;object-fit:contain;display:block}
 .android-btn.active{border-color:var(--accent);background:var(--surface)}
 
+/* ── Научная школа: ссылка в шапке ── */
+.school-btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:.35rem;
+  height:2rem;padding:0 .6rem;
+  border:1px solid var(--border);border-radius:.5rem;
+  background:var(--surface2);color:var(--text2);
+  text-decoration:none;font-size:.78rem;font-weight:600;
+  transition:all .15s;flex-shrink:0;white-space:nowrap;
+}
+.school-btn:hover{color:var(--text);border-color:var(--text3)}
+.school-btn svg{width:1rem;height:1rem;flex-shrink:0;color:var(--accent)}
+.school-btn.active{border-color:var(--accent);background:var(--surface);color:var(--text)}
+
 /* ── Controls ── */
 .controls{
   padding:.75rem 1rem;
@@ -590,11 +603,99 @@ html:not([data-theme]) .theme-btn .icon-sun{display:inline}
 .install-steps{margin:.25rem 0 0 1.1rem;display:flex;flex-direction:column;gap:.35rem;font-size:.82rem;line-height:1.5;color:var(--text2)}
 .install-steps em{font-style:normal;color:var(--text)}
 
-/* ── Узкие экраны: шапка с Android-иконкой ── */
+/* ── Научная школа (school.html) ── */
+.school-page{max-width:52rem;margin:0 auto;padding:1rem 1rem 0}
+
+.school-hero{padding:1.25rem 0 1rem;border-bottom:1px solid var(--border)}
+.school-kicker{
+  font-size:.72rem;text-transform:uppercase;letter-spacing:.12em;
+  color:var(--text3);margin-bottom:.4rem;
+}
+.school-hero h2{font-size:1.5rem;font-weight:700;line-height:1.2;overflow-wrap:anywhere}
+.school-dates{color:var(--accent);font-weight:600;font-size:.95rem;margin-top:.5rem}
+.school-lead{color:var(--text2);font-size:.82rem;margin-top:.2rem}
+
+.school-day{
+  margin-top:1rem;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  overflow:hidden;
+}
+.school-day-head{
+  display:flex;align-items:baseline;gap:.5rem;flex-wrap:wrap;
+  padding:.7rem 1rem;
+  background:var(--surface2);border-bottom:1px solid var(--border);
+  font-size:.95rem;font-weight:700;
+}
+.school-day-date{color:var(--text)}
+.school-day-weekday{font-size:.78rem;font-weight:500;color:var(--text3)}
+
+.school-events{list-style:none;margin:0;padding:0}
+.school-event{
+  display:grid;grid-template-columns:3.1rem minmax(0,1fr);
+  gap:.15rem .7rem;
+  padding:.8rem 1rem;
+  border-bottom:1px solid var(--border);
+}
+.school-event:last-child{border-bottom:none}
+.school-time{
+  font-size:.88rem;font-weight:700;color:var(--accent);
+  font-variant-numeric:tabular-nums;line-height:1.35;
+}
+.school-event-body{min-width:0}
+.school-title{font-size:.92rem;font-weight:600;line-height:1.35;overflow-wrap:anywhere}
+.school-lecturer{font-size:.78rem;color:var(--text2);line-height:1.4;margin-top:.15rem}
+
+.school-place{
+  grid-column:2;justify-self:start;margin-top:.4rem;
+  padding:.2rem .5rem;border:1px solid var(--border);border-radius:.5rem;
+  background:var(--surface2);color:var(--text2);
+  font-size:.75rem;font-weight:600;line-height:1.4;white-space:nowrap;
+}
+.school-place-online{
+  display:inline-flex;align-items:center;gap:.45rem;flex-wrap:wrap;
+  background:rgba(59,130,246,.08);border-color:rgba(59,130,246,.3);
+}
+.school-online-badge{color:var(--accent);font-weight:700}
+.school-join{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:.28rem .55rem;border-radius:.4rem;
+  background:var(--accent);color:#fff;
+  font-size:.72rem;font-weight:600;text-decoration:none;
+  transition:background .15s;
+}
+.school-join:hover{background:var(--accent2)}
+
+.school-shifts{margin:1.5rem 0 .5rem}
+.school-shifts-title{font-size:1rem;font-weight:700;margin-bottom:.6rem}
+.school-shift-grid{display:grid;gap:.6rem}
+.school-shift{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:.8rem 1rem;
+}
+.school-shift h3{font-size:.88rem;font-weight:600;line-height:1.35}
+.school-shift p{font-size:.78rem;color:var(--text2);line-height:1.4;margin-top:.15rem}
+
+@media(min-width:640px){
+  .school-page{padding:1.25rem 1.5rem 0}
+  .school-hero h2{font-size:1.8rem}
+  .school-event{grid-template-columns:3.4rem minmax(0,1fr) auto;gap:.2rem 1rem}
+  .school-place{grid-column:3;grid-row:1;margin-top:0;justify-self:end}
+  .school-shift-grid{grid-template-columns:1fr 1fr}
+}
+
+/* ── Узкие экраны: шапка в два ряда ── */
+@media(max-width:560px){
+  .header{flex-wrap:wrap;padding-bottom:.5rem}
+  .header-right{display:contents}
+  .header h1{margin-right:auto}
+  .nav{flex:1 0 100%;justify-content:center;padding-top:.1rem}
+}
+
 @media(max-width:380px){
   .header{padding:.6rem .6rem;gap:.35rem}
   .header h1{font-size:.92rem}
   .nav{gap:.2rem}
   .nav a{padding:.35rem .5rem;font-size:.72rem}
   .theme-btn,.android-btn{width:1.85rem;height:1.85rem}
+  .school-btn{height:1.85rem;padding:0 .45rem;font-size:.72rem}
 }
