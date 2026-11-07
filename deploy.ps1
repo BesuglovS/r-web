@@ -132,6 +132,14 @@ if (-not $DryRun -and (Test-Path $envLocal)) {
   cmd /c $scpEnvCmd
   if ($LASTEXITCODE -ne 0) {
     Write-Host "  WARNING: .env upload failed - admin login via file won't work on server" -ForegroundColor Yellow
+  } else {
+    # .env читается PHP-FPM (www-data), но не должен быть доступен всем.
+    $envPermArgs = @()
+    if ($sshPort -ne '22') { $envPermArgs += "-P $sshPort" }
+    if ($identityFile) { $envPermArgs += "-i"; $envPermArgs += $identityFile }
+    $envPermArgs += $remote
+    $envPermArgs += "chmod 640 '$envRemoteDir/.env'"
+    & ssh @envPermArgs
   }
 }
 
@@ -248,18 +256,26 @@ if ($DryRun) {
 } else {
   Write-Host "`n==> Setting up cron job ..." -ForegroundColor Cyan
 
-  $cronCmd = "echo '$cronContent' > /etc/cron.d/r-web && chmod 644 /etc/cron.d/r-web && touch $cronLog && chown ${cronUser}:${cronUser} $cronLog 2>/dev/null || true"
   $sshCronArgs = @()
   if ($sshPort -ne '22') { $sshCronArgs += "-P $sshPort" }
   if ($identityFile) { $sshCronArgs += "-i"; $sshCronArgs += $identityFile }
   $sshCronArgs += $remote
-  $sshCronArgs += $cronCmd
-  & ssh @sshCronArgs
 
-  if ($LASTEXITCODE -ne 0) {
-    Write-Host "  Cron setup failed (non-fatal)" -ForegroundColor Yellow
+  # /etc/cron.d принадлежит root, поэтому штатный деплой не должен писать туда
+  # вслепую: сначала сверяем содержимое и обновляем только при расхождении.
+  $existingCron = (& ssh @sshCronArgs "cat /etc/cron.d/r-web 2>/dev/null") -join "`n"
+  if ($LASTEXITCODE -eq 0 -and $existingCron.Trim() -eq $cronContent) {
+    Write-Host "  Already up to date." -ForegroundColor Green
   } else {
-    Write-Host "  Done." -ForegroundColor Green
+    $cronCmd = "if echo '$cronContent' > /etc/cron.d/r-web; then chmod 644 /etc/cron.d/r-web; touch $cronLog 2>/dev/null; exit 0; else exit 1; fi"
+    $sshCronArgs += $cronCmd
+    & ssh @sshCronArgs
+
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "  Cron setup skipped: /etc/cron.d is root-only, update it as root (non-fatal)" -ForegroundColor Yellow
+    } else {
+      Write-Host "  Done." -ForegroundColor Green
+    }
   }
 }
 
