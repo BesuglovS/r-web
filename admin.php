@@ -485,6 +485,21 @@ foreach ($log as $entry) {
         .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         .table-wrap table { min-width: 800px; }
 
+        /* Источники расписаний: таблица умещается в карточку без горизонтального скролла */
+        .sources-wrap { overflow-x: clip; }
+        .sources-wrap table { min-width: 0; }
+        .sources-table th, .sources-table td { padding: .45rem .4rem; }
+        .sources-table .btn-sm { padding: .28rem .5rem; font-size: .75rem; }
+        /* Кнопки не сжимаем: иначе «Удалить» вылезает за правый край таблицы */
+        .sources-table .source-actions { gap: .35rem; }
+        .sources-table .source-actions > * { flex: 0 0 auto; }
+        .sources-table .cell-url {
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         .last-import-card { padding: 1rem 1.5rem; }
         .last-import-card.status-ok { border-left: 4px solid #34d399; }
         .last-import-card.status-error { border-left: 4px solid #f87171; }
@@ -527,6 +542,44 @@ foreach ($log as $entry) {
             font-size: .72rem;
         }
         .tab-btn.active .tab-count { background: #1d4ed8; color: #dbeafe; }
+
+        /* Узкие экраны: источники — карточками, без горизонтального скролла */
+        @media (max-width: 700px) {
+            body { padding: 1rem; }
+            .card { padding: 1rem; }
+            .sources-table colgroup,
+            .sources-table thead { display: none; }
+            .sources-table,
+            .sources-table tbody,
+            .sources-table tr,
+            .sources-table td { display: block; width: 100%; }
+            .sources-table tr {
+                padding: .6rem 0;
+                border-bottom: 1px solid #334155;
+            }
+            .sources-table tr:last-child { border-bottom: none; }
+            .sources-table td {
+                padding: .2rem 0;
+                border-bottom: none;
+                overflow: visible;
+            }
+            .sources-table td::before {
+                content: attr(data-label);
+                display: block;
+                margin-bottom: .1rem;
+                color: #64748b;
+                font-size: .7rem;
+            }
+            .sources-table .cell-url {
+                white-space: normal;
+                overflow-wrap: anywhere;
+            }
+            .sources-table .source-error-text {
+                white-space: normal;
+                overflow-wrap: anywhere;
+            }
+            .sources-table .source-actions { margin-top: .2rem; }
+        }
     </style>
 </head>
 <body>
@@ -589,16 +642,16 @@ foreach ($log as $entry) {
             <?php if (empty($sources)): ?>
                 <p style="color: #64748b;">Нет добавленных источников</p>
             <?php else: ?>
-                <div class="table-wrap">
+                <div class="table-wrap sources-wrap">
                 <table class="sources-table">
                     <colgroup>
-                        <col style="width:3.5rem">
+                        <col style="width:2.8rem">
                         <col>
-                        <col style="width:16%">
-                        <col style="width:10%">
-                        <col style="width:25%">
+                        <col style="width:17%">
                         <col style="width:9%">
                         <col style="width:20%">
+                        <col style="width:9%">
+                        <col style="width:18%">
                     </colgroup>
                     <thead>
                         <tr>
@@ -614,16 +667,16 @@ foreach ($log as $entry) {
                     <tbody>
                         <?php foreach ($sources as $src): ?>
                             <tr data-id="<?= (int)$src['id'] ?>">
-                                <td><?= (int)$src['id'] ?></td>
-                                <td class="cell-label"><?= htmlspecialchars($src['label']) ?></td>
-                                <td class="cell-url" style="max-width:250px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                <td data-label="ID"><?= (int)$src['id'] ?></td>
+                                <td class="cell-label" data-label="Описание"><?= htmlspecialchars($src['label']) ?></td>
+                                <td class="cell-url" data-label="URL"
                                     title="<?= htmlspecialchars($src['url']) ?>">
                                     <?= htmlspecialchars($src['url']) ?>
                                 </td>
-                                <td class="<?= (int)$src['is_active'] ? 'source-active' : 'source-inactive' ?>">
+                                <td class="<?= (int)$src['is_active'] ? 'source-active' : 'source-inactive' ?>" data-label="Статус">
                                     <?= (int)$src['is_active'] ? 'Активен' : 'Выкл' ?>
                                 </td>
-                                <td>
+                                <td data-label="Последний импорт">
                                     <?php if ($src['last_imported_at']): ?>
                                         <span class="source-status-<?= $src['last_import_status'] === 'error' ? 'error' : 'ok' ?>">
                                             <?= $src['last_import_status'] === 'ok' ? 'OK' : ($src['last_import_status'] === 'no_changes' ? 'Без изменений' : 'Ошибка') ?>
@@ -636,7 +689,7 @@ foreach ($log as $entry) {
                                         <span style="color:#64748b;">—</span>
                                     <?php endif; ?>
                                 </td>
-                                <td>
+                                <td data-label="Архив">
                                     <?php if (isset($archive_files[(int)$src['id']])): ?>
                                         <?php $af = $archive_files[(int)$src['id']]; $af_ts = @filemtime($af) ?: 0; ?>
                                         <span class="source-active" title="<?= htmlspecialchars(basename($af)) ?>">есть</span>
@@ -647,7 +700,7 @@ foreach ($log as $entry) {
                                         <span class="source-inactive">нет</span>
                                     <?php endif; ?>
                                 </td>
-                                <td>
+                                <td data-label="Действия">
                                     <div class="source-actions">
                                         <button type="button" class="btn-sm btn-edit"
                                                 data-url="<?= htmlspecialchars($src['url']) ?>"
