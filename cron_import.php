@@ -50,20 +50,27 @@ if ($backup !== null) {
 
 $changed = 0;
 $unchanged = 0;
+$paused = 0;
 foreach ($result['results'] as $r) {
     if (($r['check'] ?? '') === 'changed') {
         $changed++;
     } elseif (($r['check'] ?? '') === 'unchanged') {
         $unchanged++;
+    } elseif (($r['check'] ?? '') === 'backoff') {
+        $paused++;
     }
 }
 
-echo "Источников: {$result['total']}, Импортов: $changed, Без изменений: $unchanged, Ошибок: {$result['errors']}\n";
+echo "Источников: {$result['total']}, Импортов: $changed, Без изменений: $unchanged, На паузе: $paused, Ошибок: {$result['errors']}\n";
 
 foreach ($result['results'] as $r) {
     switch ($r['check'] ?? '') {
         case 'unchanged':
             echo "  [БЕЗ ИЗМЕНЕНИЙ] ID={$r['id']} URL={$r['url']}\n";
+            break;
+
+        case 'backoff':
+            echo "  [ПАУЗА ПОСЛЕ 429] ID={$r['id']} URL={$r['url']} — до {$r['until']} UTC\n";
             break;
 
         case 'changed':

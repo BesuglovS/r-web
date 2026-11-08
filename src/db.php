@@ -135,8 +135,11 @@ function init_db(PDO $pdo): void
     // 11 = + уникальные индексы расписания/архива: буквальные дубли строк
     //     схлопываются (остаётся самая свежая запись), повторная вставка
     //     одной и той же строки больше невозможна.
+    // 12 = + backoff-поля в schedule_sources (backoff_level, backoff_until):
+    //     после HTTP 429 источник временно не опрашивается (экспоненциальная
+    //     пауза), чтобы не продлевать rate-limit Яндекса.
     $ver = (int)$pdo->query('PRAGMA user_version')->fetchColumn();
-    if ($ver >= 11) {
+    if ($ver >= 12) {
         $inited[$key] = true;
         return;
     }
@@ -243,8 +246,8 @@ function init_db(PDO $pdo): void
     migrate_unique_lessons($pdo);
 
     // Поднять версию схемы (после UTC-миграции, чтобы она успела отработать на старых БД)
-    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 11) {
-        $pdo->exec('PRAGMA user_version = 11');
+    if ((int)$pdo->query('PRAGMA user_version')->fetchColumn() < 12) {
+        $pdo->exec('PRAGMA user_version = 12');
     }
 
     $inited[$key] = true;
@@ -268,6 +271,10 @@ function migrate_source_columns(PDO $pdo): void
         // Даты, покрытые последним успешным полным импортом источника (JSON-массив).
         // Нужно do_check_all(): unchanged-источник подтверждает свои даты без импорта.
         "ALTER TABLE schedule_sources ADD COLUMN last_dates TEXT DEFAULT NULL",
+        // Backoff после HTTP 429: сколько 429 подряд получено и до какого
+        // времени (UTC) источник не опрашивать.
+        "ALTER TABLE schedule_sources ADD COLUMN backoff_level INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE schedule_sources ADD COLUMN backoff_until TEXT DEFAULT NULL",
     ];
     foreach ($additions as $sql) {
         if (preg_match('/ADD COLUMN (\w+)/', $sql, $m) && !isset($existing[$m[1]])) {

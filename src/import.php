@@ -576,6 +576,9 @@ function do_import(string $public_url, ?PDO $existing_pdo = null): array
         // Чистим старые записи истории и журнала
         prune_old_data($pdo);
 
+        // Успешный импорт снимает backoff после предыдущих HTTP 429
+        reset_source_backoff_by_url($pdo, $public_url);
+
         return [
             'status'  => $has_changes ? 'ok' : 'no_changes',
             'lessons' => count($lessons),
@@ -1597,9 +1600,56 @@ function update_source_check(PDO $pdo, int $id, ?array $meta = null, string $err
 }
 
 /**
+ * Пауза после HTTP 429 (в минутах): 10 → 20 → 40 → 60, дальше 60.
+ * Уровень = число подряд полученных 429 (schedule_sources.backoff_level).
+ */
+function source_backoff_minutes(int $level): int
+{
+    $delays = [10, 20, 40, 60];
+    $level = max(1, $level);
+    return $delays[min($level, count($delays)) - 1];
+}
+
+/**
+ * Ставит источник на паузу после HTTP 429. Возвращает время окончания (UTC).
+ */
+function set_source_backoff(PDO $pdo, int $id, int $level): string
+{
+    $until = gmdate('Y-m-d H:i:s', time() + source_backoff_minutes($level) * 60);
+    $stmt = $pdo->prepare(
+        "UPDATE schedule_sources SET backoff_level = ?, backoff_until = ? WHERE id = ?"
+    );
+    $stmt->execute([$level, $until, $id]);
+    return $until;
+}
+
+/**
+ * Снимает паузу по id источника (успешная проверка).
+ */
+function reset_source_backoff(PDO $pdo, int $id): void
+{
+    $stmt = $pdo->prepare(
+        "UPDATE schedule_sources SET backoff_level = 0, backoff_until = NULL WHERE id = ?"
+    );
+    $stmt->execute([$id]);
+}
+
+/**
+ * Снимает паузу по URL — после успешного импорта (в т.ч. ручного из админки).
+ */
+function reset_source_backoff_by_url(PDO $pdo, string $url): void
+{
+    $stmt = $pdo->prepare(
+        "UPDATE schedule_sources SET backoff_level = 0, backoff_until = NULL WHERE url = ?"
+    );
+    $stmt->execute([$url]);
+}
+
+/**
  * Лёгкая проверка всех активных источников: запрашивает только метаданные файла
  * (md5/modified/size) и запускает полный импорт лишь при изменении файла.
  * Страховка: раз в $force_full_interval_hours — принудительный полный импорт.
+ * Источники, получившие HTTP 429, пропускаются до истечения backoff-паузы.
  */
 function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = null): array
 {
@@ -1617,10 +1667,20 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
     $archive_errors = []; // ошибки автоархивации (импорт при этом успешен)
     $covered = 0;        // источники, чьи даты подтверждены (импорт ИЛИ unchanged)
     $ok_dates = [];      // даты, покрытые успешно импортированными источниками
+    $paused = 0;         // источники, пропущенные из-за backoff после HTTP 429
 
     foreach ($active as $source) {
         $id = (int)$source['id'];
         $url = $source['url'];
+
+        // Backoff после 429: пока пауза не истекла — не трогаем Яндекс вообще.
+        $backoff_until = (string)($source['backoff_until'] ?? '');
+        $backoff_ts = $backoff_until !== '' ? (strtotime($backoff_until . ' UTC') ?: 0) : 0;
+        if ($backoff_ts > time()) {
+            $paused++;
+            $results[] = ['id' => $id, 'url' => $url, 'check' => 'backoff', 'until' => $backoff_until];
+            continue;
+        }
 
         // Страховочный полный импорт: прошло больше N часов с последнего
         $last_imported = (string)($source['last_imported_at'] ?? '');
@@ -1674,6 +1734,8 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
                     'archive_error' => $archive_error,
                 ];
             } else {
+                // Успешная проверка (файл не изменился) снимает паузу после 429
+                reset_source_backoff($pdo, $id);
                 update_source_check($pdo, $id, $meta);
                 log_check($pdo, $id, $url, 'unchanged', $old_md5, $meta['md5']);
 
@@ -1691,6 +1753,16 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
             }
         } catch (Exception $e) {
             $msg = $e->getMessage();
+
+            // HTTP 429 — rate-limit Яндекса: ставим источник на паузу
+            // (10 → 20 → 40 → 60 минут), чтобы не продлевать блокировку
+            // запросами каждые 5 минут.
+            if (str_contains($msg, 'HTTP 429')) {
+                $level = (int)($source['backoff_level'] ?? 0) + 1;
+                $until = set_source_backoff($pdo, $id, $level);
+                $msg .= " — пауза до {$until} UTC (backoff, попытка {$level})";
+            }
+
             update_source_check($pdo, $id, null, $msg);
             log_check($pdo, $id, $url, 'error', '', '', $msg);
             $errors[] = ['id' => $id, 'url' => $url, 'error' => $msg];
@@ -1725,8 +1797,9 @@ function do_check_all(int $force_full_interval_hours = 6, ?PDO $existing_pdo = n
 
     return [
         'total'   => count($active),
-        'success' => count($active) - count($errors),
+        'success' => count($active) - count($errors) - $paused,
         'errors'  => count($errors),
+        'paused'  => $paused,
         'results' => $results,
         'error_details' => $errors,
         'last_error' => $errors ? $errors[count($errors) - 1] : null,

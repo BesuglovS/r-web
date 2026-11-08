@@ -79,7 +79,7 @@ if ($pdo === null) {
     exit(1);
 }
 init_db($pdo);
-check('новая БД: user_version = 11', (int)$pdo->query('PRAGMA user_version')->fetchColumn() === 11);
+check('новая БД: user_version = 12', (int)$pdo->query('PRAGMA user_version')->fetchColumn() === 12);
 $idx = $pdo->query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('uniq_schedule_lesson','uniq_schedule_archive_lesson')")->fetchAll(PDO::FETCH_COLUMN);
 sort($idx);
 check('уникальные индексы созданы', $idx === ['uniq_schedule_archive_lesson', 'uniq_schedule_lesson']);
@@ -134,7 +134,7 @@ $mig->prepare("INSERT INTO schedule_archive
             'Информатика', 'Жаринова Л.А.', '111', NULL, ?)")->execute(['2026-10-23 00:01:00']);
 
 migrate_unique_lessons($mig);
-$mig->exec('PRAGMA user_version = 11');
+$mig->exec('PRAGMA user_version = 12');
 
 $live = (int)$mig->query("SELECT COUNT(*) FROM schedule")->fetchColumn();
 $arch = (int)$mig->query("SELECT COUNT(*) FROM schedule_archive")->fetchColumn();

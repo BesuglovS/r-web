@@ -21,8 +21,17 @@ function send_error_email(array $errors): bool
     }
 
     // Дедупликация: при устойчивой ошибке cron (каждые 5 минут) не спамим —
-    // то же самое письмо не чаще раза в 6 часов.
-    $fingerprint = md5(serialize($errors));
+    // то же самое письмо не чаще раза в 6 часов. Суффикс про backoff-паузу
+    // (меняется на каждой повторной попытке 429) в отпечаток не включаем,
+    // иначе письмо про один и тот же rate-limit уходило бы на каждую попытку.
+    $fingerprintErrors = array_map(
+        static fn(array $e): array => [
+            'url'   => $e['url'] ?? '',
+            'error' => preg_replace('/ — пауза до .*$/u', '', (string)($e['error'] ?? '')),
+        ],
+        $errors
+    );
+    $fingerprint = md5(serialize($fingerprintErrors));
     $stateFile = sys_get_temp_dir() . '/r-web-notify-state.json';
     $state = [];
     if (file_exists($stateFile)) {

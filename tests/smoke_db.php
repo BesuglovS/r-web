@@ -1,7 +1,12 @@
 <?php if (PHP_SAPI !== "cli") { http_response_code(404); exit; } ?>
 <?php
 // Временный интеграционный смоук: init_db / prune_old_data / backup_db
-putenv('SCHEDULE_DB_PATH=' . sys_get_temp_dir() . '/rweb_test/schedule.db');
+$db_file = sys_get_temp_dir() . '/rweb_test/schedule.db';
+putenv('SCHEDULE_DB_PATH=' . $db_file);
+// Тест должен переживать повторный запуск: убираем БД прошлого прогона
+@unlink($db_file);
+@unlink($db_file . '-wal');
+@unlink($db_file . '-shm');
 require __DIR__ . '/../src/db.php';
 
 $pdo = get_db();
